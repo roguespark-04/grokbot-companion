@@ -24,6 +24,7 @@ Demo repo: https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75
 After validating pins/audio in Arduino, port working init sequences into:
 
 - `main/audio_capture.c` / `audio_playback.c`
-- `main/display_face.c`
+- `main/power_info.c` / `rtc_time.c` (AXP2101 / PCF85063 register checks)
+- Display/touch come from the Waveshare BSP + LVGL 9 (`main/ui/`), so no Arduino port is needed
 
 Do **not** put Meridian sender keys in Arduino sketches either — use the relay.

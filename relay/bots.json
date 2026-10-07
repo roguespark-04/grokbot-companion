@@ -1,0 +1,17 @@
+{
+  "_comment": "Grok Bot Companion bot roster. Edit freely — the relay re-reads this file on change (no restart). shape: circle | squircle | hexagon | diamond | triangle | star | ring | pill | octagon | blob. color/accent: #RRGGBB. default_voice_id must match an id in voices.json (optional). Order = carousel order.",
+  "version": 1,
+  "default_bot_id": "meridian",
+  "bots": [
+    {"id": "meridian",  "name": "Meridian",  "shape": "circle",   "color": "#3B82F6", "accent": "#BFDBFE", "default_voice_id": "placeholder-calm"},
+    {"id": "spark",     "name": "Spark",     "shape": "star",     "color": "#F59E0B", "accent": "#FEF3C7", "default_voice_id": "placeholder-bright"},
+    {"id": "quark",     "name": "Quark",     "shape": "hexagon",  "color": "#8B5CF6", "accent": "#DDD6FE", "default_voice_id": "placeholder-crisp"},
+    {"id": "scribe",    "name": "Scribe",    "shape": "squircle", "color": "#14B8A6", "accent": "#CCFBF1", "default_voice_id": "placeholder-warm"},
+    {"id": "photon",    "name": "Photon",    "shape": "diamond",  "color": "#FACC15", "accent": "#FEF9C3", "default_voice_id": "placeholder-bright"},
+    {"id": "dr_eggbot", "name": "dr eggbot", "shape": "blob",     "color": "#F5E6C8", "accent": "#FB923C", "default_voice_id": "placeholder-playful"},
+    {"id": "pulse",     "name": "Pulse",     "shape": "ring",     "color": "#EF4444", "accent": "#FECACA", "default_voice_id": "placeholder-crisp"},
+    {"id": "proton",    "name": "Proton",    "shape": "octagon",  "color": "#22C55E", "accent": "#BBF7D0", "default_voice_id": "placeholder-deep"},
+    {"id": "clay",      "name": "Clay",      "shape": "pill",     "color": "#C2410C", "accent": "#FED7AA", "default_voice_id": "placeholder-warm"},
+    {"id": "nexus",     "name": "Nexus",     "shape": "triangle", "color": "#EC4899", "accent": "#FBCFE8", "default_voice_id": "placeholder-calm"}
+  ]
+}

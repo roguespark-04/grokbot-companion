@@ -1,0 +1,10 @@
+## IDF Component Manager manifest
+## Waveshare BSP v3 brings: CO5300 AMOLED (QSPI), CST9217 touch, esp_lvgl_adapter (LVGL task
+## + lock), ES8311/ES7210 codecs via esp_codec_dev, TCA9554 expander. Requires IDF >= 5.5.
+dependencies:
+  idf: ">=5.5"
+  waveshare/esp32_s3_touch_amoled_1_75:
+    version: "^3.0.1"
+  lvgl/lvgl:
+    version: "9.4.*"
+    public: true

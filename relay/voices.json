@@ -1,0 +1,13 @@
+{
+  "_comment": "PLACEHOLDER voice list. These ids are NOT real TTS voices — they are labels the device passes through as voice_id. Meridian / the TTS side maps each id to whatever real voice it actually has. Edit freely; the relay re-reads this file on change (no restart).",
+  "version": 1,
+  "placeholder": true,
+  "voices": [
+    {"id": "placeholder-calm",    "name": "Calm (placeholder)",    "description": "Placeholder: even, unhurried delivery. Reply side maps to a real voice."},
+    {"id": "placeholder-warm",    "name": "Warm (placeholder)",    "description": "Placeholder: friendly, softer tone. Reply side maps to a real voice."},
+    {"id": "placeholder-bright",  "name": "Bright (placeholder)",  "description": "Placeholder: upbeat, energetic. Reply side maps to a real voice."},
+    {"id": "placeholder-crisp",   "name": "Crisp (placeholder)",   "description": "Placeholder: clear and concise. Reply side maps to a real voice."},
+    {"id": "placeholder-deep",    "name": "Deep (placeholder)",    "description": "Placeholder: lower pitch. Reply side maps to a real voice."},
+    {"id": "placeholder-playful", "name": "Playful (placeholder)", "description": "Placeholder: lighter, more animated. Reply side maps to a real voice."}
+  ]
+}

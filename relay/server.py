@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Grok Bot Companion — audio relay (v1).
+"""Grok Bot Companion — audio relay (v1.1: multi-bot).
 
 Device talks only to this relay. Meridian sender key stays here.
 Persists job metadata under DATA_DIR so restarts keep pending jobs.
+
+v1.1 adds the multi-bot roster (GET /bots from bots.json), placeholder voice
+list (GET /voices from voices.json), per-bot live status (GET /status/<bot_id>,
+PUT /internal/status/<bot_id>), and target_bot_id / voice_id / conversation_id
+on uploads + the JSON wake so Meridian can route each turn.
 """
 from __future__ import annotations
 
@@ -11,8 +16,10 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -53,11 +60,28 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 AUDIO_DIR = DATA_DIR / "audio"
 REPLIES_DIR = DATA_DIR / "replies"
 JOBS_DIR = DATA_DIR / "jobs"
+STATUS_DIR = DATA_DIR / "status"
 WAKE_FAIL_LOG = DATA_DIR / "wake_fail.log"
+
+# Editable roster / placeholder voices (re-read on mtime change; no restart needed)
+BOTS_PATH = Path(os.environ.get("BOTS_FILE", str(RELAY_DIR / "bots.json"))).resolve()
+VOICES_PATH = Path(os.environ.get("VOICES_FILE", str(RELAY_DIR / "voices.json"))).resolve()
+# Non-idle status older than this is reported with stale=true (device shows idle)
+STATUS_STALE_MS = int(os.environ.get("STATUS_STALE_MS", str(10 * 60_000)))
+
+STATUS_STATES = ("idle", "listening", "thinking", "working", "speaking", "error")
+STATUS_TEXT_MAX = 120
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_VOICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+BOT_SHAPES = (
+    "circle", "squircle", "hexagon", "diamond", "triangle",
+    "star", "ring", "pill", "octagon", "blob",
+)
 
 
 def _ensure_dirs() -> None:
-    for d in (DATA_DIR, AUDIO_DIR, REPLIES_DIR, JOBS_DIR):
+    for d in (DATA_DIR, AUDIO_DIR, REPLIES_DIR, JOBS_DIR, STATUS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -160,6 +184,146 @@ def new_job_id() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Bot roster + placeholder voices (JSON files, cached by mtime)
+# ---------------------------------------------------------------------------
+
+_catalog_lock = threading.Lock()
+_catalog_cache: dict[str, tuple[float, object]] = {}
+
+
+def _load_json_cached(path: Path) -> object:
+    """Load JSON, re-reading only when the file mtime changes."""
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    with _catalog_lock:
+        hit = _catalog_cache.get(key)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            log.error("could not parse %s: %s", path.name, e)
+            return hit[1] if hit else None
+        _catalog_cache[key] = (mtime, data)
+        return data
+
+
+def load_voices() -> list[dict]:
+    data = _load_json_cached(VOICES_PATH) or {}
+    out: list[dict] = []
+    for v in data.get("voices", []) if isinstance(data, dict) else []:
+        vid = str(v.get("id", "")).strip()
+        if not _VOICE_RE.match(vid):
+            continue
+        out.append(
+            {
+                "id": vid,
+                "name": str(v.get("name") or vid)[:40],
+                "description": str(v.get("description") or "")[:160],
+            }
+        )
+    return out
+
+
+def voices_are_placeholder() -> bool:
+    data = _load_json_cached(VOICES_PATH) or {}
+    return bool(isinstance(data, dict) and data.get("placeholder", False))
+
+
+def load_bots() -> tuple[list[dict], str]:
+    """Return (bots, default_bot_id). Invalid rows are skipped, not fatal."""
+    data = _load_json_cached(BOTS_PATH) or {}
+    voice_ids = {v["id"] for v in load_voices()}
+    bots: list[dict] = []
+    seen: set[str] = set()
+    for b in data.get("bots", []) if isinstance(data, dict) else []:
+        bid = str(b.get("id", "")).strip()
+        if not _ID_RE.match(bid) or bid in seen:
+            log.warning("bots.json: skipping invalid/duplicate id %r", bid)
+            continue
+        seen.add(bid)
+        shape = str(b.get("shape", "circle")).strip().lower()
+        if shape not in BOT_SHAPES:
+            shape = "circle"
+        color = str(b.get("color", "#888888")).strip()
+        accent = str(b.get("accent", "#FFFFFF")).strip()
+        row = {
+            "id": bid,
+            "name": str(b.get("name") or bid)[:24],
+            "shape": shape,
+            "color": color if _HEX_RE.match(color) else "#888888",
+            "accent": accent if _HEX_RE.match(accent) else "#FFFFFF",
+        }
+        dv = str(b.get("default_voice_id") or "").strip()
+        if dv and dv in voice_ids:
+            row["default_voice_id"] = dv
+        bots.append(row)
+    default_id = str(data.get("default_bot_id", "")) if isinstance(data, dict) else ""
+    if bots and default_id not in seen:
+        default_id = bots[0]["id"]
+    return bots, default_id
+
+
+def find_bot(bot_id: str) -> dict | None:
+    bots, _ = load_bots()
+    return next((b for b in bots if b["id"] == bot_id), None)
+
+
+# ---------------------------------------------------------------------------
+# Per-bot live status (persisted one JSON per bot)
+# ---------------------------------------------------------------------------
+
+def _status_path(bot_id: str) -> Path:
+    if not _ID_RE.match(bot_id):
+        raise ValueError("invalid bot_id")
+    return STATUS_DIR / f"{bot_id}.json"
+
+
+def write_status(bot_id: str, state: str, text: str, **extra) -> dict:
+    rec = {
+        "bot_id": bot_id,
+        "state": state,
+        "text": text[:STATUS_TEXT_MAX],
+        "updated_at_ms": int(time.time() * 1000),
+    }
+    for k, v in extra.items():
+        if v is not None:
+            rec[k] = v
+    path = _status_path(bot_id)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec), encoding="utf-8")
+    tmp.replace(path)
+    return rec
+
+
+def read_status(bot_id: str) -> dict:
+    path = _status_path(bot_id)
+    rec = None
+    if path.exists():
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            rec = None
+    if not rec:
+        return {"bot_id": bot_id, "state": "idle", "text": "Ready",
+                "updated_at_ms": 0, "stale": False}
+    age = int(time.time() * 1000) - int(rec.get("updated_at_ms", 0))
+    rec["stale"] = bool(rec.get("state") != "idle" and age > STATUS_STALE_MS)
+    return rec
+
+
+def _clean_header_id(name: str, query_key: str, pattern: re.Pattern) -> tuple[str, bool]:
+    """Read an id from header or query string. Returns (value, ok)."""
+    raw = (request.headers.get(name) or request.args.get(query_key) or "").strip()
+    if not raw:
+        return "", True
+    return raw, bool(pattern.match(raw))
+
+
+# ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
 
@@ -204,6 +368,14 @@ def require_internal_auth() -> tuple | None:
     if token and hmac.compare_digest(token, INTERNAL_TOKEN):
         return None
     return jsonify(error="unauthorized"), 401
+
+
+def require_device_or_internal_auth() -> tuple | None:
+    """Read endpoints (/bots, /voices, /status): device token or internal token."""
+    token = _bearer_token()
+    if INTERNAL_TOKEN and token and hmac.compare_digest(token, INTERNAL_TOKEN):
+        return None
+    return require_device_auth()
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +454,33 @@ def upload():
         return err
 
     device_id = request.headers.get("X-Device-Id", "unknown").strip() or "unknown"
+
+    # Multi-bot routing (headers preferred; query string accepted for curl tests)
+    target_bot_id, ok = _clean_header_id("X-Target-Bot-Id", "target_bot_id", _ID_RE)
+    if not ok:
+        return jsonify(error="invalid target_bot_id"), 400
+    bots, default_bot_id = load_bots()
+    if not target_bot_id:
+        target_bot_id = default_bot_id or "meridian"
+    bot = next((b for b in bots if b["id"] == target_bot_id), None)
+    if bots and bot is None:
+        return jsonify(error="unknown target_bot_id", target_bot_id=target_bot_id), 400
+
+    voice_id, ok = _clean_header_id("X-Voice-Id", "voice_id", _VOICE_RE)
+    if not ok:
+        return jsonify(error="invalid voice_id"), 400
+    if not voice_id and bot:
+        voice_id = bot.get("default_voice_id", "")
+    if voice_id and voice_id not in {v["id"] for v in load_voices()}:
+        # Pass through anyway: the reply side owns the real voice catalog.
+        log.info("voice_id %s not in voices.json — forwarding as-is", voice_id)
+
+    conversation_id, ok = _clean_header_id(
+        "X-Conversation-Id", "conversation_id", _VOICE_RE
+    )
+    if not ok:
+        return jsonify(error="invalid conversation_id"), 400
+
     raw = request.get_data()
     if not raw:
         return jsonify(error="empty body"), 400
@@ -309,17 +508,36 @@ def upload():
         "audio_path": str(audio_path),
         "reply_audio_url": None,
         "error": None,
+        "target_bot_id": target_bot_id,
+        "voice_id": voice_id or None,
+        "conversation_id": conversation_id or None,
     }
     save_job(job)
 
+    status_url = f"{PUBLIC_BASE_URL}/status/{target_bot_id}"
     wake_body = {
         "action": "voice_turn",
         "job_id": job_id,
         "device_id": device_id,
         "audio_url": audio_url,
+        "result_url": result_url,
         "timestamp_ms": now_ms,
+        "target_bot_id": target_bot_id,
+        "target_bot_name": bot["name"] if bot else target_bot_id,
+        "voice_id": voice_id or None,
+        "conversation_id": conversation_id or None,
+        "status_url": status_url,
     }
-    wake_meridian(wake_body)
+    try:
+        write_status(
+            target_bot_id, "thinking",
+            "Sent to Meridian" if target_bot_id == "meridian"
+            else f"Meridian is passing this to {wake_body['target_bot_name']}",
+            job_id=job_id, source="relay",
+        )
+    except (OSError, ValueError) as e:
+        log.warning("status write failed for %s: %s", target_bot_id, e)
+    woken = wake_meridian(wake_body)
     # Always 201 with pending result even if wake failed
 
     return (
@@ -327,7 +545,11 @@ def upload():
             job_id=job_id,
             audio_url=audio_url,
             result_url=result_url,
+            status_url=status_url,
             expires_at_ms=expires_at_ms,
+            target_bot_id=target_bot_id,
+            voice_id=voice_id or None,
+            woken=woken,
         ),
         201,
     )
@@ -375,6 +597,7 @@ def get_result(job_id: str):
             "reply_path",
             "error",
             "reply_audio_url",
+            "conversation_id",
         ):
             payload[k] = v
     return jsonify(payload), 200
@@ -433,6 +656,7 @@ def put_result(job_id: str):
         job["reply_path"] = str(reply_path)
         job["error"] = None
         save_job(job)
+        _status_after_result(job)
         return jsonify(ok=True, job_id=job_id, status="ready"), 200
 
     data = request.get_json(force=True, silent=True) or {}
@@ -444,6 +668,7 @@ def put_result(job_id: str):
             or "error"
         )
         save_job(job)
+        _status_after_result(job)
         return jsonify(ok=True, job_id=job_id, status="error"), 200
 
     # JSON ready: may include reply_audio_url or we expect audio was already written
@@ -463,7 +688,79 @@ def put_result(job_id: str):
             job["reply_audio_url"] = f"{PUBLIC_BASE_URL}/replies/{job_id}.wav"
             job["reply_path"] = str(reply_path)
     save_job(job)
+    _status_after_result(job)
     return jsonify(ok=True, job_id=job_id, status=job["status"]), 200
+
+
+def _status_after_result(job: dict) -> None:
+    """When a reply lands, settle the bot's status unless Meridian already did."""
+    bot_id = job.get("target_bot_id")
+    if not bot_id:
+        return
+    try:
+        cur = read_status(bot_id)
+        if cur.get("job_id") not in (None, job["job_id"]):
+            return  # a newer turn owns the status line
+        if job.get("status") == "error":
+            write_status(bot_id, "error", str(job.get("error") or "Something went wrong")[:STATUS_TEXT_MAX],
+                         job_id=job["job_id"], source="relay")
+        elif job.get("status") == "ready":
+            write_status(bot_id, "idle", "Reply ready", job_id=job["job_id"], source="relay")
+    except (OSError, ValueError) as e:
+        log.warning("status settle failed for %s: %s", bot_id, e)
+
+
+@app.get("/bots")
+def get_bots():
+    err = require_device_or_internal_auth()
+    if err:
+        return err
+    bots, default_id = load_bots()
+    return jsonify(version=1, default_bot_id=default_id, bots=bots), 200
+
+
+@app.get("/voices")
+def get_voices():
+    err = require_device_or_internal_auth()
+    if err:
+        return err
+    return jsonify(version=1, placeholder=voices_are_placeholder(), voices=load_voices()), 200
+
+
+@app.get("/status/<bot_id>")
+def get_status(bot_id: str):
+    err = require_device_or_internal_auth()
+    if err:
+        return err
+    if not _ID_RE.match(bot_id) or not find_bot(bot_id):
+        return jsonify(error="unknown bot"), 404
+    return jsonify(read_status(bot_id)), 200
+
+
+@app.put("/internal/status/<bot_id>")
+def put_status(bot_id: str):
+    """Meridian pushes live status: {state, text, job_id?}."""
+    err = require_internal_auth()
+    if err:
+        return err
+    if not _ID_RE.match(bot_id) or not find_bot(bot_id):
+        return jsonify(error="unknown bot"), 404
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="JSON body required"), 400
+    state = str(data.get("state", "")).strip().lower()
+    if state not in STATUS_STATES:
+        return jsonify(error="invalid state", allowed=list(STATUS_STATES)), 400
+    text = str(data.get("text") or "").strip()
+    if not text:
+        text = {"idle": "Ready", "listening": "Listening", "thinking": "Thinking...",
+                "working": "Working on it", "speaking": "Speaking",
+                "error": "Something went wrong"}[state]
+    job_id = data.get("job_id")
+    if job_id is not None and not (isinstance(job_id, str) and _VOICE_RE.match(job_id)):
+        return jsonify(error="invalid job_id"), 400
+    rec = write_status(bot_id, state, text, job_id=job_id, source="meridian")
+    return jsonify(ok=True, **rec), 200
 
 
 @app.post("/probe")

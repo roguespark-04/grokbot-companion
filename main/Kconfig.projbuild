@@ -1,4 +1,4 @@
-menu "Pocket Companion Configuration"
+menu "Grok Bot Companion Configuration"
 
     config MUSE_DEVICE_ID
         string "Device ID"
@@ -63,6 +63,60 @@ menu "Pocket Companion Configuration"
         int "Minimum PTT hold before capture starts (ms)"
         default 50
         range 0 500
+
+    config MUSE_WAKE_LONG_PRESS_MS
+        int "Locked: BOOT hold threshold that starts a voice turn (ms)"
+        default 300
+        range 150 1000
+        help
+            While the screen is locked (asleep), a BOOT press shorter than this only wakes
+            the screen (no recording). Holding past it wakes AND starts LISTENING; audio is
+            captured from the moment of wake so the first words are kept.
+
+    config MUSE_DIM_BEFORE_SLEEP_MS
+        int "Dim duration before the screen turns off (ms)"
+        default 4000
+        range 0 30000
+        help
+            After the auto-sleep timeout the AMOLED dims and shows a brief "sleeping"
+            hint for this long; any touch / BOOT press cancels.
+
+    config MUSE_PREROLL_MS
+        int "Mic pre-roll kept while armed (ms)"
+        default 300
+        range 0 1000
+        help
+            Ring buffer prepended to a turn started by VAD (always-listen) so the start
+            of the first word isn't clipped.
+
+    config MUSE_MAX_UTTERANCE_S
+        int "Max utterance length (s)"
+        default 20
+        range 3 60
+
+    config MUSE_MIN_UTTERANCE_MS
+        int "Min utterance length to upload (ms)"
+        default 300
+        range 0 2000
+
+    config MUSE_REPLY_TIMEOUT_S
+        int "Give up waiting for a reply after (s)"
+        default 120
+        range 10 600
+
+    config MUSE_CAPTURE_STUB_SILENCE
+        bool "Stub mic returns silence (exercise relay path before ES7210 is wired)"
+        default n
+
+    config MUSE_TZ
+        string "POSIX TZ string"
+        default "CST6CDT,M3.2.0,M11.1.0"
+        help
+            Local time zone for the status bar / device panel (Frank: America/Chicago).
+
+    config MUSE_SNTP_SERVER
+        string "SNTP server"
+        default "pool.ntp.org"
 
     config MUSE_PTT_USE_BOOT_BUTTON
         bool "Use BOOT button (GPIO0) as press-and-hold PTT"

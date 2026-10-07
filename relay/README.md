@@ -1,4 +1,4 @@
-# Grok Bot Companion — audio relay (v1)
+# Grok Bot Companion — audio relay (v1.1, multi-bot)
 
 **Product:** Grok Bot Companion (repo `grokbot-companion`)  
 **Role:** Device-facing upload + result poll on the shared box (Tailscale). Holds the Meridian webhook sender key and POSTs JSON-only wakes.
@@ -28,7 +28,11 @@ curl -s http://127.0.0.1:8787/health
 
 | Method | Path | Auth | Notes |
 | --- | --- | --- | --- |
-| `POST` | `/upload` | Bearer `DEVICE_TOKEN` or `X-Signature` HMAC | Body: WAV/PCM 16 kHz mono. Header `X-Device-Id`. Returns `201` `{job_id, audio_url, result_url, expires_at_ms}` |
+| `POST` | `/upload` | Bearer `DEVICE_TOKEN` or `X-Signature` HMAC | Body: WAV/PCM 16 kHz mono. Headers `X-Device-Id`, `X-Target-Bot-Id` (default `meridian`; unknown → `400`), `X-Voice-Id` (default = bot's `default_voice_id`), `X-Conversation-Id` (optional). Returns `201` `{job_id, audio_url, result_url, status_url, expires_at_ms, target_bot_id, voice_id, woken}` |
+| `GET` | `/bots` | device or internal bearer | Roster from `bots.json`: `{default_bot_id, bots:[{id,name,shape,color,accent,default_voice_id?}]}` |
+| `GET` | `/voices` | device or internal bearer | Placeholder voices from `voices.json`: `{placeholder:true, voices:[{id,name,description}]}` |
+| `GET` | `/status/<bot_id>` | device or internal bearer | `{bot_id,state,text,updated_at_ms,stale,job_id?,source}`; unknown bot → `404` |
+| `PUT` | `/internal/status/<bot_id>` | Bearer `INTERNAL_TOKEN` | Meridian pushes `{state,text,job_id?}`; `state` ∈ idle/listening/thinking/working/speaking/error |
 | `GET` | `/result/<job_id>` | device auth | `202` pending / `200` ready (`reply_audio_url`) or error |
 | `GET` | `/audio/<job_id>.wav` | Tailscale / unguessable id | Meridian fetches uploaded audio |
 | `GET` | `/replies/<job_id>.wav` | Tailscale / unguessable id | Device downloads reply WAV |
@@ -45,8 +49,13 @@ X-Automation-Key: <MERIDIAN_SENDER_KEY>
 Content-Type: application/json
 timeout 8s, one try, no retry
 
-{ "action": "voice_turn", "job_id", "device_id", "audio_url", "timestamp_ms" }
+{ "action": "voice_turn", "job_id", "device_id", "audio_url", "result_url", "timestamp_ms",
+  "target_bot_id", "target_bot_name", "voice_id", "conversation_id", "status_url" }
 ```
+
+The job JSON (`data/jobs/<job_id>.json`) also stores `target_bot_id`, `voice_id`, and `conversation_id`.
+On upload the relay sets the bot's status to `thinking`. When the result lands it sets
+`idle` ("Reply ready") or `error`, unless a newer job already owns that bot's status.
 
 If the wake fails, the relay appends a JSON line to `data/wake_fail.log` and still returns `201` to the device (result stays `pending`). If URL/key are unset, it logs a warning and skips the wake (dev mode).
 
@@ -61,6 +70,29 @@ curl -X PUT "http://127.0.0.1:8787/internal/result/j_abc" \
 
 Or JSON: `{ "status": "ready", "reply_audio_url": "..." }` / `{ "status": "error", "message": "..." }`.
 
+## Bot roster & voices (no restart needed)
+
+* `bots.json` is the carousel order plus each bot's procedural avatar (`shape`, `color`, `accent`)
+  and optional `default_voice_id`. Invalid rows are skipped and logged.
+* `voices.json` holds **placeholder** voice ids. They're labels the device passes through as
+  `voice_id`, not real TTS voices. Replace them once Meridian/TTS confirms real ones.
+* Both files are re-read when their mtime changes. The device refreshes them on Wi-Fi
+  connect and every 15 min, and caches them in NVS.
+
+## Live status
+
+```bash
+# Meridian (or ops) pushes what the device should show under the bot's avatar
+curl -X PUT http://127.0.0.1:8787/internal/status/photon \
+  -H "Authorization: Bearer $INTERNAL_TOKEN" -H "Content-Type: application/json" \
+  -d '{"state":"working","text":"Photon is working on it"}'
+
+curl -s http://127.0.0.1:8787/status/photon -H "Authorization: Bearer $DEVICE_TOKEN"
+```
+
+Keep `text` ASCII and ≤ 120 chars. A non-idle status older than `STATUS_STALE_MS` (default 10 min)
+comes back `stale: true`, and the device treats it as idle.
+
 ## Config (`.env`)
 
 | Variable | Purpose |
@@ -71,7 +103,9 @@ Or JSON: `{ "status": "ready", "reply_audio_url": "..." }` / `{ "status": "error
 | `DEVICE_TOKEN` | Bearer for device upload/poll |
 | `DEVICE_HMAC_SECRET` | Optional alternative: `X-Signature: sha256=<hex>` over body |
 | `INTERNAL_TOKEN` | Bearer for `PUT /internal/result/...` |
-| `DATA_DIR` | Job JSON + audio + replies (survives restarts) |
+| `DATA_DIR` | Job JSON + audio + replies + `status/` (survives restarts) |
+| `BOTS_FILE` / `VOICES_FILE` | Override paths to `bots.json` / `voices.json` (default: next to `server.py`) |
+| `STATUS_STALE_MS` | Age after which non-idle status is reported stale (default 600000) |
 
 Secrets live in `relay/.env` only (gitignored). See `.env.example`.
 
@@ -79,15 +113,19 @@ Secrets live in `relay/.env` only (gitignored). See `.env.example`.
 
 ```
 relay/
-  server.py          # Flask v1 relay
+  server.py          # Flask relay (v1.1)
+  bots.json          # roster: carousel order + avatar shape/color + default voice
+  voices.json        # PLACEHOLDER voice list (GET /voices)
   stub_server.py     # thin re-export of server.py
   run.sh             # venv + load .env + start
+  ensure-up.sh       # restart tailscaled / relay if down (box has no service manager)
   requirements.txt
   .env.example
   data/              # runtime (gitignored contents ok)
     audio/
     replies/
     jobs/
+    status/          # one JSON per bot (latest state/text)
     wake_fail.log    # failed wakes for later drain
 ```
 
@@ -106,6 +144,15 @@ Prefer Tailscale so the relay is not on the public internet:
 - Job IDs are unguessable; audio/reply GETs rely on that + private network.
 - Never log `MERIDIAN_SENDER_KEY`, `DEVICE_TOKEN`, or `INTERNAL_TOKEN`.
 - Failed wakes land in `wake_fail.log` (bodies only — no secrets beyond URLs).
+
+## Restarting safely (shared box)
+
+```bash
+pkill -f "python server.py"          # only the relay process
+cd /workspace/grokbot-companion-push/relay
+nohup ./run.sh >> /tmp/grokbot-relay.log 2>&1 &
+curl -s http://127.0.0.1:8787/health
+```
 
 ## Manual smoke test
 

@@ -1,22 +1,39 @@
 idf_component_register(
     SRCS
         "main.c"
+        "settings_store.c"
+        "bot_registry.c"
+        "power_mgr.c"
+        "power_info.c"
+        "rtc_time.c"
+        "vad.c"
         "audio_capture.c"
         "audio_playback.c"
-        "display_face.c"
         "wifi_net.c"
         "webhook_client.c"
         "ptt_button.c"
+        "ui/ui.c"
+        "ui/ui_home.c"
+        "ui/ui_bot_panel.c"
+        "ui/ui_voice_picker.c"
+        "ui/ui_device_panel.c"
+        "ui/ui_gesture.c"
+        "ui/ui_avatar.c"
     INCLUDE_DIRS
         "."
         "include"
+        "ui"
     REQUIRES
         nvs_flash
         esp_wifi
         esp_netif
         esp_http_client
         esp_event
-        driver
+        esp_timer
+        esp_pm
+        esp_app_format
+        esp_driver_gpio
+        esp_driver_i2c
         freertos
         json
         mbedtls
