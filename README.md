@@ -12,7 +12,7 @@ Repo: https://github.com/roguespark-04/grokbot-companion
 | Project skeleton | **Done** (ESP-IDF layout + stubs) |
 | Board hardware | **Not arrived** — no on-device bring-up yet |
 | Meridian wake contract | **Locked** — see [WEBHOOK_CONTRACT.md](WEBHOOK_CONTRACT.md) |
-| Audio relay | Stub outline in [relay/](relay/) (Spark owns real service) |
+| Audio relay | **v1 ready** in [relay/](relay/) — Flask + persistent jobs; needs Meridian webhook URL |
 | Vertical slice | PTT → capture → upload → poll reply → play → status face (**stubs**) |
 
 ## Hardware
@@ -58,7 +58,7 @@ When the board arrives, wire Waveshare demos into the stubs:
 Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/) (v5.x recommended; match Waveshare demo IDF when bringing up hardware).
 
 ```bash
-cd /workspace/muse-charm   # placeholder path
+cd /workspace/grokbot-companion-push   # or your clone path
 idf.py set-target esp32s3
 idf.py menuconfig          # Muse Charm Configuration → Wi-Fi + relay URL
 idf.py build
@@ -75,7 +75,7 @@ Download mode if flash fails: hold **BOOT**, tap **RESET**, release RESET, relea
 ## Tree
 
 ```
-muse-charm/                 # placeholder folder name
+grokbot-companion/
   CMakeLists.txt
   sdkconfig.defaults
   README.md
@@ -88,7 +88,7 @@ muse-charm/                 # placeholder folder name
     main.c                  # state machine
     *_stub modules...
     include/
-  relay/                    # Spark stub outline (not on-device)
+  relay/                    # Audio relay v1 (shared box; not on-device)
 ```
 
 ## Arduino
@@ -97,7 +97,7 @@ Primary tree is ESP-IDF. Thin notes: [ARDUINO_NOTES.md](ARDUINO_NOTES.md).
 
 ## Open questions (Frank / Meridian / Spark)
 
-- Final **product & repo name**
+- ~~Final product & repo name~~ → **Grok Bot Companion** / `grokbot-companion`
 - Spark relay host (Tailscale hostname) and device auth scheme (HMAC vs bearer)
 - Meridian → relay reply write mechanism (callback vs other)
 - Max PTT utterance length / upload size
