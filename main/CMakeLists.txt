@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "audio_capture.c"
+        "audio_playback.c"
+        "display_face.c"
+        "wifi_net.c"
+        "webhook_client.c"
+        "ptt_button.c"
+    INCLUDE_DIRS
+        "."
+        "include"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_http_client
+        esp_event
+        driver
+        freertos
+        json
+        mbedtls
+)

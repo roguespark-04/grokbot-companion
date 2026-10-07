@@ -1,0 +1,73 @@
+menu "Pocket Companion Configuration"
+
+    config MUSE_DEVICE_ID
+        string "Device ID"
+        default "pocket-001"
+        help
+            Unique identifier for upload + Meridian wake (via relay).
+            Prefer a stable per-unit ID (e.g. derived from MAC) in production.
+
+    config MUSE_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "YOUR_SSID"
+        help
+            Placeholder — set via menuconfig before flash. Do not commit real credentials.
+
+    config MUSE_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default "YOUR_PASSWORD"
+        help
+            Placeholder — set via menuconfig before flash. Do not commit real credentials.
+
+    config MUSE_UPLOAD_URL
+        string "Audio relay base URL"
+        default "https://relay.example.ts.net"
+        help
+            Tailscale (or LAN) relay base. Device POSTs /upload and polls /result/:job_id.
+            Device talks ONLY to this relay — never holds Meridian sender key.
+
+    config MUSE_DEVICE_RELAY_TOKEN
+        string "Device↔relay bearer token (optional)"
+        default ""
+        help
+            Bearer for device→relay auth (v1 alternative to HMAC). Empty in skeleton.
+
+    config MUSE_HMAC_SECRET
+        string "Device↔relay HMAC secret (optional)"
+        default ""
+        help
+            If set, upload/poll requests include X-Signature over the body/path.
+            This is NOT the Meridian webhook sender key.
+
+    config MUSE_WEBHOOK_URL
+        string "(Relay-only doc) Meridian wake URL — do not use on device in production"
+        default "https://example.invalid/webhooks/muse-charm-wake"
+        help
+            Documented for relay/.env — ESP32 production builds must not call Meridian
+            directly. Skeleton may leave this unused.
+
+    config MUSE_SENDER_BEARER_TOKEN
+        string "(Relay-only doc) Meridian sender key — NEVER flash in production"
+        default ""
+        help
+            Belongs in relay environment only. Left in Kconfig as a warning placeholder.
+
+    config MUSE_AUDIO_SAMPLE_RATE
+        int "Capture sample rate for upload (Hz)"
+        default 16000
+        help
+            Contract: 16 kHz mono PCM WAV. Board BSP voice profile is 24 kHz —
+            downsample or reconfigure I2S as needed.
+
+    config MUSE_PTT_HOLD_MS
+        int "Minimum PTT hold before capture starts (ms)"
+        default 50
+        range 0 500
+
+    config MUSE_PTT_USE_BOOT_BUTTON
+        bool "Use BOOT button (GPIO0) as press-to-talk"
+        default y
+        help
+            BOOT is GPIO0 (active low). PWR via TCA9554 EXIO4 later. Touch PTT later.
+
+endmenu
