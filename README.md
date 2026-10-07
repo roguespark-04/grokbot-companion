@@ -11,66 +11,69 @@ Repo: https://github.com/roguespark-04/grokbot-companion
 | --- | --- |
 | Firmware | **Builds clean** (ESP-IDF v5.5.1, BSP `waveshare/esp32_s3_touch_amoled_1_75` 3.0.1, LVGL 9.4) |
 | Board hardware | **Not arrived.** Codec, I2S, PMIC, and RTC paths are marked `HARDWARE TODO` |
-| Multi-bot touch UI | **Done in code**: carousel, per-bot panel, voice picker, device panel, sleep/lock |
-| Meridian wake contract | v1 **locked**; v1.1 adds `target_bot_id` / `voice_id` / `conversation_id`. See [WEBHOOK_CONTRACT.md](WEBHOOK_CONTRACT.md) |
-| Audio relay | **Live** on the shared box (Tailscale, `:8787`). Adds `/bots`, `/voices`, `/status`. See [relay/](relay/) |
+| Multi-bot touch UI | **Done in code**: minimal full-screen avatar home, infinite carousel, bot panel, voice picker (28 app voices), device panel, sleep/lock |
+| Wake contract | v1 **locked**; v1.1 multi-bot fields; v1.2 direct per-bot wakes + `wake_route`. See [WEBHOOK_CONTRACT.md](WEBHOOK_CONTRACT.md) |
+| Audio relay | **Live** on the shared box, public HTTPS via Tailscale Funnel (`https://grokbot-box.tail4de099.ts.net`). Direct per-bot wakes with Meridian fallback. See [relay/](relay/) |
 | Buttons | **BOOT** = hold-to-talk (and wake from lock); **PWR** = power on/off (AXP2101) |
 
 ## Mockups
 
-Rendered from the same layout numbers as `main/ui/` by
-[`docs/mockups/render_mockups.py`](docs/mockups/render_mockups.py). The avatars are procedural:
-we can't pull the Grok Bot app's real art or animations.
+Rendered from the same layout numbers and shape code as `main/ui/` by
+[`docs/mockups/render_mockups.py`](docs/mockups/render_mockups.py). Shapes and colors follow
+each bot's app profile (avatarShape / avatarColor); hex values are approximate until checked
+against app screenshots.
 
-| Home / carousel | Swipe up: bot panel | Voice picker | Swipe down: device | Sleep / lock |
+![Home: Meridian idle, Photon working, Pulse listening, Scribe speaking](docs/mockups/01_home_carousel.png)
+
+| Mid-swipe (wraps Nexus → Meridian) | Swipe up: bot panel | Voice picker | Swipe down: device | Sleep / lock |
 | --- | --- | --- | --- | --- |
-| ![](docs/mockups/01_home_carousel.png) | ![](docs/mockups/02_bot_panel.png) | ![](docs/mockups/03_voice_picker.png) | ![](docs/mockups/04_device_settings.png) | ![](docs/mockups/05_sleep_lock.png) |
+| ![](docs/mockups/01b_carousel_midswipe.png) | ![](docs/mockups/02_bot_panel.png) | ![](docs/mockups/03_voice_picker.png) | ![](docs/mockups/04_device_settings.png) | ![](docs/mockups/05_sleep_lock.png) |
 
-The carousel wraps around: [01b_carousel_wrap_sequence.png](docs/mockups/01b_carousel_wrap_sequence.png).
-The rest of the bot panel when scrolled: [02b](docs/mockups/02b_bot_panel_scrolled.png).
-Every bot in every animation state: [06_avatar_states_sheet.png](docs/mockups/06_avatar_states_sheet.png).
+Also: single home frames `docs/mockups/01_home_{meridian_idle,photon_working,pulse_listening,scribe_speaking}.png`,
+the swipe sequence [01b_carousel_wrap_sequence.png](docs/mockups/01b_carousel_wrap_sequence.png),
+how panels open from home [07_navigation_map.png](docs/mockups/07_navigation_map.png),
+the scrolled panel [02b](docs/mockups/02b_bot_panel_scrolled.png), and every bot in every state
+[06_avatar_states_sheet.png](docs/mockups/06_avatar_states_sheet.png).
 
 ## Touch UI (`main/ui/`)
 
+**Home is minimal:** only the current bot's avatar (filling ~86 % of the round screen), its
+name, and its relay status line, overlaid on the lower avatar over a soft dark gradient.
+No clock, Wi-Fi, battery, page dots, hints, or buttons. Those live behind gestures. A
+conversation being open shows only as a soft accent glow along the screen edge.
+
 | Gesture | Where | Result |
 | --- | --- | --- |
-| Swipe ← / → | anywhere on home | Previous or next bot. **Infinite circle**: past the last bot comes the first (and vice versa), with no end stop or bounce. Slots follow your finger, then glide one step. Neighbors peek at the round edge |
+| Swipe ← / → | anywhere on home | Next / previous bot. **Infinite circle** (wraps both ways, no end stop). The current avatar slides, fades, and shrinks out while the next slides in; neighbours are invisible at rest. The new name fades in |
 | Swipe ↑ | starting at the **bottom edge** (lowest ~90 px) | Per-bot panel |
-| Swipe ↓ | starting at the **top edge** (top ~90 px) | Device settings |
+| Swipe ↓ | starting at the **top edge** (top ~90 px) | Device settings (time, Wi-Fi, battery, firmware, device ID) |
 | Swipe ↓ / tap grabber | top of the bot panel or voice picker | Close |
 | Swipe ↑ / tap grabber | bottom of the device panel | Close |
 
-* **Home** shows the selected bot's procedural avatar, name, and a live status line (dot +
-  text such as "Photon is working on it"), plus time, Wi-Fi, battery, and page dots.
-* **Per-bot panel**: talk mode (**Press to talk** is the default, or **Always listen**),
-  Start/End conversation, **Voice**, volume, brightness (applies live), and auto-sleep
-  (15s / 30s / 1m / 5m / Never).
-* **Voice picker**: a roller of voices from `GET /voices`, a description, Preview (stub), and
-  Select. The choice is stored per bot in NVS (`voice_<bot_id>`). With no saved choice it
-  falls back to the bot's `default_voice_id`. The device only passes `voice_id`; Meridian/TTS
-  decides what it sounds like. The seed voices are **placeholders**.
-* **Device panel**: Wi-Fi (SSID, signal, status, IP), battery (%, charging, mV from the
-  AXP2101), time (PCF85063 → SNTP), firmware version, device ID, and relay reachability.
-* **Horizontal swipes inside panels never change the bot.** Panels sit on `lv_layer_top()`
-  over the home screen, their content scrolls only vertically, and the home gesture handler
-  also checks `g_ui.panel`. The carousel is also locked during a voice turn, so the reply
-  stays with the bot you asked.
-* **Persistence (NVS `companion`)**: `last_bot` (written after the carousel settles and at
-  the start of every turn), `talk_mode`, `volume`, `bright`, `sleep_s`, `voice_<bot_id>`, plus
-  cached `/bots` and `/voices` bodies so the carousel works offline. Boot and wake go back to
-  the last bot.
-* **Avatars** (`ui_avatar.c`) are data-driven. Each bot's shape, color, and accent come from
-  `relay/bots.json`. States: idle = breathing + blink, listening = ripple rings, thinking =
-  orbiting dots, working = fast accent orbit, speaking = amplitude-driven scale + mouth,
-  error = shake + red. The renderer is a vtable (`ui_avatar_renderer_t`), so a sprite-sheet
-  renderer can replace it per bot later.
+Optional `MUSE_UI_EDGE_HINTS` (default off) shows a faint grabber only while a finger is on
+the top or bottom edge.
+
+* **Per-bot panel**: talk mode (**Press to talk** default / **Always listen**),
+  Start/End conversation, **Voice**, volume, brightness, auto-sleep.
+* **Voice picker**: a scrollable roller of the Grok Bot app's 28 voices (xAI grok-tts ids
+  from `GET /voices`). Stored per bot in NVS (`voice_<bot_id>`), default from the roster
+  (Clay = Cosmo, others = Eve). The device sends the id; the reply side synthesizes with it.
+  Preview is enabled only when the relay has a clip (optional, TODO).
+* **Horizontal swipes inside panels never change the bot**, and the carousel is locked
+  during a voice turn.
+* **Avatars** (`ui_avatar.c`): one draw callback paints the shape (blob, teardrop, cloud,
+  hex, squircle, circle), eyes, and effects. idle = breathing + blink (blob/cloud outlines
+  slowly morph), listening = ripples, thinking = dots orbiting the rim, working = faster
+  accent orbit, speaking = level-driven scale + waveform mouth, error = shake + red. Dark
+  bodies get a light rim. The renderer is a vtable, so a sprite renderer can replace it.
 
 ### Bots (from the relay, `GET /bots`)
 
-Meridian (blue circle) · Spark (amber star) · Quark (violet hexagon) · Scribe (teal squircle) ·
-Photon (yellow diamond) · dr eggbot (cream egg) · Pulse (red ring) · Proton (green octagon) ·
-Clay (burnt-orange pill) · Nexus (pink triangle). To change them, edit `relay/bots.json`; no
-reflash is needed.
+Meridian (gray blob) · Spark (TBD) · Quark (TBD) · Scribe (black teardrop, light rim) ·
+Photon (yellow teardrop) · dr eggbot (red teardrop) · Pulse (blue cloud) · Proton (green hex) ·
+Clay (brown squircle) · Nexus (violet blob). Spark and Quark use a neutral placeholder until
+we have a screenshot of their app look. Edit `relay/bots.json` (palette + per-bot `avatar`);
+no reflash needed.
 
 ## Talking
 
@@ -136,7 +139,7 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-Key Kconfig: `MUSE_UPLOAD_URL`, `MUSE_DEVICE_RELAY_TOKEN`, `MUSE_DEVICE_ID`,
+Key Kconfig: `MUSE_UPLOAD_URL` (default `https://grokbot-box.tail4de099.ts.net`, TLS verified with the ESP-IDF certificate bundle), `MUSE_DEVICE_RELAY_TOKEN`, `MUSE_DEVICE_ID`,
 `MUSE_WAKE_LONG_PRESS_MS` (300), `MUSE_DIM_BEFORE_SLEEP_MS` (4000), `MUSE_PREROLL_MS` (300),
 `MUSE_MAX_UTTERANCE_S` (20), `MUSE_TZ` (Chicago), and `MUSE_CAPTURE_STUB_SILENCE` (exercise the
 relay path before the mic is wired). Custom `partitions.csv` uses a 6 MB factory app.
@@ -170,10 +173,8 @@ docs/mockups/         PNG mockups + renderer
 
 ## Open questions
 
-- **Network path**: the relay is on the tailnet (100.x / `*.ts.net`), but the ESP32 can't run
-  Tailscale. Options are Tailscale Funnel (public HTTPS plus the device token) or a LAN-side
-  gateway. This needs deciding before first flash.
+- Exact avatar colors and Spark/Quark looks: waiting on app screenshots (`relay/bots.json` palette).
+- Reply-side xAI grok-tts backend (voice ids are already the app's); preview clips are TODO.
 - Talk mode is device-wide today, while voice is per bot. Should talk mode be per bot too?
-- Always-listen only listens while a conversation is open. Should selecting it start one?
-- Real voice list for the TTS side, and whether Preview should play a relay-hosted clip.
-- Unicode in status text needs a bigger font (Latin-1/emoji) built into flash.
+- Always-listen only listens while a conversation is open.
+- Unicode in status text would need a bigger font (the relay forces ASCII today).

@@ -309,7 +309,6 @@ void ui_set_device_info(const ui_device_info_t *info)
 {
     LOCK();
     g_ui.dev = *info;
-    ui_home_refresh_statusbar();
     if (g_ui.panel == UI_PANEL_DEVICE) ui_device_panel_refresh();
     UNLOCK();
 }

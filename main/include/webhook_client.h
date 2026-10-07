@@ -68,6 +68,12 @@ esp_err_t webhook_client_get_status(const char *bot_id, relay_status_t *out);
 esp_err_t webhook_client_get_json(const char *path, char **out, size_t *out_len);
 
 /** GET an absolute URL into a malloc'd buffer (reply WAV). max_len guards PSRAM use. */
+/** Re-base a relay-owned URL (/replies/, /result/, ...) onto CONFIG_MUSE_UPLOAD_URL.
+ *  Relative paths are joined to the base; external URLs are copied unchanged. */
+void webhook_client_relay_url(const char *in, char *out, size_t n);
+
+/** Download into a PSRAM buffer (caller frees). Relay URLs are re-based and carry the
+ *  device token; other hosts get no token. */
 esp_err_t webhook_client_download(const char *url, uint8_t **out, size_t *out_len, size_t max_len);
 
 #ifdef __cplusplus

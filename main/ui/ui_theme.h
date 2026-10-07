@@ -18,14 +18,18 @@
 #define UI_SWIPE_VEL    600     /* px/s flick commits even when short */
 #define UI_AXIS_LOCK    12      /* px before an axis is chosen */
 
-/* Carousel */
-#define UI_CAROUSEL_SPACING  200   /* px between bot slots (neighbors peek at the round edge) */
-#define UI_CAROUSEL_SLOTS    5     /* -2..+2 so a full drag step stays filled */
-#define UI_CAROUSEL_Y        178   /* avatar center y */
-#define UI_AVATAR_BOX        250   /* avatar root (room for ripples) */
-#define UI_AVATAR_BODY       150   /* body size at scale 1.0 */
-#define UI_PEEK_SCALE        140   /* neighbor scale (256 = 1.0) */
-#define UI_PEEK_OPA          110
+/* Minimal home: one full-screen avatar; neighbours exist only while dragging */
+#define UI_CAROUSEL_SPACING  340   /* px the avatars slide per step (current out, next in) */
+#define UI_CAROUSEL_SLOTS    3     /* prev / current / next */
+#define UI_NEIGHBOR_SCALE    200   /* 256 = 1.0: incoming/outgoing avatar shrinks to ~0.78 */
+#define UI_AVATAR_DY         (-18) /* avatar sits a little high so the face clears the caption */
+#define UI_SCRIM_Y           220   /* soft dark gradient behind name + status starts here */
+#define UI_SCRIM_MID_FRAC    110   /* 3-stop ramp: 0 -> MID_OPA at this frac (0..255) -> END_OPA */
+#define UI_SCRIM_MID_OPA     150
+#define UI_SCRIM_END_OPA     225
+#define UI_NAME_Y            336   /* name label top */
+#define UI_STATUS_Y          378   /* status label top */
+#define UI_STATUS_W          300   /* round screen chord at that height leaves ~340 px */
 
 /* Palette (AMOLED: true black background saves power) */
 #define UI_COL_BG        lv_color_hex(0x000000)

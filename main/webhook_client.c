@@ -4,6 +4,7 @@
  */
 #include "webhook_client.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,59 @@ typedef struct {
     const char *hdr_names[4];
     const char *hdr_values[4];
 } http_req_t;
+
+/* ---------------------------------------------------------------- relay URLs */
+
+static size_t base_len(void)
+{
+    size_t n = strlen(CONFIG_MUSE_UPLOAD_URL);
+    while (n && CONFIG_MUSE_UPLOAD_URL[n - 1] == '/') n--;
+    return n;
+}
+
+/** True when url is on the configured relay (only those requests carry the token). */
+static bool is_relay_url(const char *url)
+{
+    size_t n = base_len();
+    return url && strncmp(url, CONFIG_MUSE_UPLOAD_URL, n) == 0 &&
+           (url[n] == '/' || url[n] == '\0' || url[n] == '?');
+}
+
+/**
+ * The relay builds URLs from its own PUBLIC_BASE_URL (the tailnet address Meridian uses),
+ * which the device can't reach through Funnel. Re-base relay-owned paths onto
+ * CONFIG_MUSE_UPLOAD_URL; leave genuinely external URLs alone (they get no token).
+ */
+void webhook_client_relay_url(const char *in, char *out, size_t n)
+{
+    static const char *RELAY_PATHS[] = {"/replies/", "/result/", "/audio/", "/status/", "/voices/"};
+    if (!in || !in[0]) {
+        if (n) out[0] = '\0';
+        return;
+    }
+    const char *path = NULL;
+    if (in[0] == '/') {
+        path = in;
+    } else {
+        const char *p = strstr(in, "://");
+        if (p) {
+            p = strchr(p + 3, '/');
+            if (p) {
+                for (size_t i = 0; i < sizeof(RELAY_PATHS) / sizeof(RELAY_PATHS[0]); i++) {
+                    if (strncmp(p, RELAY_PATHS[i], strlen(RELAY_PATHS[i])) == 0) {
+                        path = p;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (path) {
+        snprintf(out, n, "%.*s%s", (int)base_len(), CONFIG_MUSE_UPLOAD_URL, path);
+    } else {
+        strlcpy(out, in, n);
+    }
+}
 
 static void add_auth(esp_http_client_handle_t c)
 {
@@ -59,7 +113,9 @@ static esp_err_t http_do(const http_req_t *r, uint8_t **resp, size_t *resp_len,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (!c) return ESP_ERR_NO_MEM;
-    add_auth(c);
+    if (is_relay_url(r->url)) {
+        add_auth(c);   /* never send the device token to a non-relay host */
+    }
     if (r->content_type) esp_http_client_set_header(c, "Content-Type", r->content_type);
     for (int i = 0; i < 4 && r->hdr_names[i]; i++) {
         if (r->hdr_values[i] && r->hdr_values[i][0]) {
@@ -133,7 +189,7 @@ esp_err_t webhook_client_upload_audio(const uint8_t *wav, size_t wav_len,
     if (!out || !wav || !wav_len || !route || !route->target_bot_id) return ESP_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
     char url[192];
-    snprintf(url, sizeof(url), "%s/upload", CONFIG_MUSE_UPLOAD_URL);
+    snprintf(url, sizeof(url), "%.*s/upload", (int)base_len(), CONFIG_MUSE_UPLOAD_URL);
     http_req_t r = {
         .method_name = "POST", .method = HTTP_METHOD_POST, .url = url,
         .content_type = "audio/wav", .body = wav, .body_len = wav_len,
@@ -169,11 +225,8 @@ esp_err_t webhook_client_poll_result(const webhook_result_t *upload, webhook_res
     if (!upload || !out || !state) return ESP_ERR_INVALID_ARG;
     *state = RELAY_RESULT_PENDING;
     char url[256];
-    if (upload->result_url[0]) {
-        strlcpy(url, upload->result_url, sizeof(url));
-    } else {
-        snprintf(url, sizeof(url), "%s/result/%s", CONFIG_MUSE_UPLOAD_URL, upload->job_id);
-    }
+    snprintf(url, sizeof(url), "%.*s/result/%s", (int)base_len(), CONFIG_MUSE_UPLOAD_URL,
+             upload->job_id);
     http_req_t r = {.method_name = "GET", .method = HTTP_METHOD_GET, .url = url};
     uint8_t *resp = NULL;
     int status = 0;
@@ -184,11 +237,19 @@ esp_err_t webhook_client_poll_result(const webhook_result_t *upload, webhook_res
         free(resp);
         return ESP_OK;
     }
+    if (status == 410 || status == 404) {   /* expired / cleaned up on the relay */
+        free(resp);
+        *state = RELAY_RESULT_ERROR;
+        strlcpy(out->error, status == 410 ? "Reply expired" : "Turn not found", sizeof(out->error));
+        return ESP_OK;
+    }
     cJSON *root = cJSON_Parse((const char *)resp);
     const cJSON *st = root ? cJSON_GetObjectItemCaseSensitive(root, "status") : NULL;
     if (status == 200 && cJSON_IsString(st) && strcmp(st->valuestring, "ready") == 0) {
         *state = RELAY_RESULT_READY;
-        copy_json_str(root, "reply_audio_url", out->reply_audio_url, sizeof(out->reply_audio_url));
+        char raw_url[sizeof(out->reply_audio_url)] = "";
+        copy_json_str(root, "reply_audio_url", raw_url, sizeof(raw_url));
+        webhook_client_relay_url(raw_url, out->reply_audio_url, sizeof(out->reply_audio_url));
     } else if (cJSON_IsString(st) && strcmp(st->valuestring, "pending") == 0) {
         *state = RELAY_RESULT_PENDING;
     } else {
@@ -226,7 +287,7 @@ esp_err_t webhook_client_get_status(const char *bot_id, relay_status_t *out)
 esp_err_t webhook_client_get_json(const char *path, char **out, size_t *out_len)
 {
     char url[192];
-    snprintf(url, sizeof(url), "%s/%s", CONFIG_MUSE_UPLOAD_URL, path);
+    snprintf(url, sizeof(url), "%.*s/%s", (int)base_len(), CONFIG_MUSE_UPLOAD_URL, path);
     http_req_t r = {.method_name = "GET", .method = HTTP_METHOD_GET, .url = url};
     uint8_t *resp = NULL;
     int status = 0;
@@ -241,12 +302,15 @@ esp_err_t webhook_client_get_json(const char *path, char **out, size_t *out_len)
     return ESP_OK;
 }
 
-esp_err_t webhook_client_download(const char *url, uint8_t **out, size_t *out_len, size_t max_len)
+esp_err_t webhook_client_download(const char *url_in, uint8_t **out, size_t *out_len, size_t max_len)
 {
+    char url[256];
+    webhook_client_relay_url(url_in, url, sizeof(url));   /* /replies/ needs the device token */
     http_req_t r = {.method_name = "GET", .method = HTTP_METHOD_GET, .url = url};
     int status = 0;
     esp_err_t err = http_do(&r, out, out_len, max_len, &status);
     if (err == ESP_OK && status != 200) {
+        ESP_LOGW(TAG, "download HTTP %d", status);
         free(*out);
         *out = NULL;
         return ESP_FAIL;

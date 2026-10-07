@@ -1,10 +1,11 @@
 /**
  * Voice picker — opened from the bot panel's Voice row.
  *
- * Roller of voice names from GET /voices (relay/voices.json — a clearly labeled
- * placeholder set today). The device only passes the chosen voice_id along with
- * target_bot_id on POST /upload; Meridian / the TTS side decides what it sounds like.
- * Preview is a stub event (APP_EV_VOICE_PREVIEW) until the relay grows a preview clip.
+ * Scrollable roller of the Grok Bot app's voices from GET /voices (relay/voices.json:
+ * 28 xAI grok-tts ids, VOICE_MAX = 32). The device stores the choice per bot and sends
+ * that voice_id with target_bot_id on POST /upload; the reply side synthesizes with it.
+ * Preview plays GET /voices/<id>/sample.wav and is only enabled when the relay lists a
+ * sample for that voice (optional, TODO: clips generated with xAI TTS).
  */
 #include "ui_internal.h"
 
@@ -16,6 +17,7 @@ static lv_obj_t *s_title;
 static lv_obj_t *s_roller;
 static lv_obj_t *s_desc;
 static lv_obj_t *s_note;
+static lv_obj_t *s_preview;
 static char      s_opts[VOICE_MAX * (VOICE_NAME_MAX + 1)];
 
 static int roller_voice_idx(void)
@@ -28,7 +30,13 @@ static int roller_voice_idx(void)
 static void update_desc(void)
 {
     int i = roller_voice_idx();
-    lv_label_set_text(s_desc, i >= 0 ? g_ui.voices[i].description : "No voices from the relay yet.");
+    const char *d = i >= 0 ? g_ui.voices[i].description : "No voices from the relay yet.";
+    lv_label_set_text(s_desc, d[0] ? d : " ");
+    if (i >= 0 && g_ui.voices[i].has_sample) {
+        lv_obj_remove_state(s_preview, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_preview, LV_STATE_DISABLED);   /* no clip yet: TODO via xAI TTS */
+    }
 }
 
 static void roller_cb(lv_event_t *e)
@@ -104,7 +112,7 @@ void ui_voice_picker_build(void)
     ui_gesture_attach(grab, &gcb);
 
     s_roller = lv_roller_create(s_root);
-    lv_roller_set_visible_row_count(s_roller, 4);
+    lv_roller_set_visible_row_count(s_roller, 5);   /* 28 voices: swipe/fling to scroll */
     lv_obj_set_width(s_roller, 300);
     lv_obj_align(s_roller, LV_ALIGN_TOP_MID, 0, 82);
     lv_obj_set_style_text_font(s_roller, UI_FONT_BODY, 0);
@@ -120,14 +128,15 @@ void ui_voice_picker_build(void)
     lv_obj_set_width(s_desc, 300);
     lv_label_set_long_mode(s_desc, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_align(s_desc, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_desc, LV_ALIGN_TOP_MID, 0, 262);
+    lv_obj_align(s_desc, LV_ALIGN_TOP_MID, 0, 278);
 
     lv_obj_t *row = ui_plain(s_root);
     lv_obj_set_size(row, 300, 52);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 316);
-    pill_button(row, LV_SYMBOL_PLAY " Preview", UI_COL_SURFACE2, UI_COL_TEXT, preview_cb);
+    s_preview = pill_button(row, LV_SYMBOL_PLAY " Preview", UI_COL_SURFACE2, UI_COL_TEXT, preview_cb);
+    lv_obj_set_style_opa(s_preview, LV_OPA_40, LV_STATE_DISABLED);
     pill_button(row, LV_SYMBOL_OK " Select", UI_COL_ACCENT, lv_color_hex(0x0B1220), select_cb);
 
     lv_obj_t *cancel = lv_button_create(s_root);
@@ -138,7 +147,7 @@ void ui_voice_picker_build(void)
     lv_obj_center(cl);
     lv_obj_add_event_cb(cancel, cancel_cb, LV_EVENT_CLICKED, NULL);
 
-    s_note = ui_label(s_root, UI_FONT_SMALL, UI_COL_DIM, "Placeholder voices - reply side picks the real voice");
+    s_note = ui_label(s_root, UI_FONT_SMALL, UI_COL_DIM, "Placeholder voices - the reply side picks the real voice");
     lv_obj_set_width(s_note, 260);
     lv_label_set_long_mode(s_note, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_align(s_note, LV_TEXT_ALIGN_CENTER, 0);

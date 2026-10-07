@@ -21,10 +21,14 @@ menu "Grok Bot Companion Configuration"
 
     config MUSE_UPLOAD_URL
         string "Audio relay base URL"
-        default "https://relay.example.ts.net"
+        default "https://grokbot-box.tail4de099.ts.net"
         help
-            Tailscale (or LAN) relay base. Device POSTs /upload and polls /result/:job_id.
-            Device talks ONLY to this relay — never holds Meridian sender key.
+            Public HTTPS relay base (Tailscale Funnel -> 127.0.0.1:8787 on the box), no
+            trailing slash. TLS is verified with the ESP-IDF certificate bundle. The device
+            POSTs /upload, polls /result/<job_id>, downloads /replies/<job_id>.wav, and
+            reads /bots, /voices, /status/<bot>, all with the device bearer token. It talks
+            ONLY to this relay and never holds the Meridian sender key. Relay URLs that
+            come back in JSON are re-based onto this host.
 
     config MUSE_DEVICE_RELAY_TOKEN
         string "Device↔relay bearer token (optional)"
@@ -41,7 +45,7 @@ menu "Grok Bot Companion Configuration"
 
     config MUSE_WEBHOOK_URL
         string "(Relay-only doc) Meridian wake URL — do not use on device in production"
-        default "https://example.invalid/webhooks/muse-charm-wake"
+        default "https://example.invalid/webhooks/companion-wake"
         help
             Documented for relay/.env — ESP32 production builds must not call Meridian
             directly. Skeleton may leave this unused.
@@ -63,6 +67,14 @@ menu "Grok Bot Companion Configuration"
         int "Minimum PTT hold before capture starts (ms)"
         default 50
         range 0 500
+
+    config MUSE_UI_EDGE_HINTS
+        bool "Show faint edge grabbers while touching the top/bottom edge"
+        default n
+        help
+            The home screen shows only the avatar, name and status. With this on, a very
+            faint grabber appears at the top or bottom edge while a finger is down there,
+            hinting at the swipe-down (device) and swipe-up (bot panel) gestures.
 
     config MUSE_WAKE_LONG_PRESS_MS
         int "Locked: BOOT hold threshold that starts a voice turn (ms)"

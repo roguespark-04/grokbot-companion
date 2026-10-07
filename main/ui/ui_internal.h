@@ -58,7 +58,6 @@ const char *ui_voice_name(const char *voice_id);
 void ui_home_build(lv_obj_t *scr);
 void ui_home_refresh_bots(void);
 void ui_home_refresh_status(void);
-void ui_home_refresh_statusbar(void);
 void ui_home_set_level(uint8_t level);
 
 /* bot panel + voice picker (ui_bot_panel.c / ui_voice_picker.c) */

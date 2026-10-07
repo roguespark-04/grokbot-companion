@@ -315,10 +315,20 @@ static void handle_event(const app_event_t *ev)
         ui_set_current_voice(ev->str);
         break;
     }
-    case APP_EV_VOICE_PREVIEW:
-        /* STUB: relay has no preview clips yet (future GET /voices/<id>/preview.wav). */
-        ESP_LOGI(TAG, "voice preview requested: %s (stub)", ev->str);
+    case APP_EV_VOICE_PREVIEW: {
+        /* Optional relay clip GET /voices/<id>/sample.wav (TODO: generate with xAI grok-tts).
+         * The picker only enables Preview when /voices lists a sample_path. */
+        app_lock(); bool busy = s_app.turn_active; app_unlock();
+        if (busy) break;
+        char url[160];
+        snprintf(url, sizeof(url), "/voices/%s/sample.wav", ev->str);
+        char full[224];
+        webhook_client_relay_url(url, full, sizeof(full));
+        esp_err_t e = audio_playback_play_url(full);
+        if (e != ESP_OK) ESP_LOGW(TAG, "voice preview %s: %s", ev->str, esp_err_to_name(e));
+        audio_playback_stop();
         break;
+    }
     case APP_EV_VOLUME:
         audio_playback_set_volume((uint8_t)ev->ival);
         if (ev->ival2) settings_set_volume((uint8_t)ev->ival);

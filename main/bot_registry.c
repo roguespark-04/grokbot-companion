@@ -1,8 +1,9 @@
 /**
  * Bot roster + voice registry.
  *
- * GET /bots   → {"default_bot_id": "...", "bots": [{id,name,shape,color,accent,default_voice_id?}]}
- * GET /voices → {"placeholder": true, "voices": [{id,name,description}]}
+ * GET /bots   → {"default_bot_id": "...", "bots": [{id,name,shape,color,accent,rim?,shape_scale,
+ *                shape_rotation,shape_wobble,shape_seed,avatar_tbd,default_voice_id?}]}
+ * GET /voices → {"placeholder": false, "voices": [{id,name,description,sample_path?}]}
  */
 #include "bot_registry.h"
 
@@ -25,33 +26,91 @@ static bool         s_voices_placeholder = true;
  * Mirrors relay/bots.json — the relay copy wins once fetched. */
 static const char *BUILTIN_BOTS_JSON =
     "{\"default_bot_id\":\"meridian\",\"bots\":["
-    "{\"id\":\"meridian\",\"name\":\"Meridian\",\"shape\":\"circle\",\"color\":\"#3B82F6\",\"accent\":\"#BFDBFE\",\"default_voice_id\":\"placeholder-calm\"},"
-    "{\"id\":\"spark\",\"name\":\"Spark\",\"shape\":\"star\",\"color\":\"#F59E0B\",\"accent\":\"#FEF3C7\",\"default_voice_id\":\"placeholder-bright\"},"
-    "{\"id\":\"quark\",\"name\":\"Quark\",\"shape\":\"hexagon\",\"color\":\"#8B5CF6\",\"accent\":\"#DDD6FE\",\"default_voice_id\":\"placeholder-crisp\"},"
-    "{\"id\":\"scribe\",\"name\":\"Scribe\",\"shape\":\"squircle\",\"color\":\"#14B8A6\",\"accent\":\"#CCFBF1\",\"default_voice_id\":\"placeholder-warm\"},"
-    "{\"id\":\"photon\",\"name\":\"Photon\",\"shape\":\"diamond\",\"color\":\"#FACC15\",\"accent\":\"#FEF9C3\",\"default_voice_id\":\"placeholder-bright\"},"
-    "{\"id\":\"dr_eggbot\",\"name\":\"dr eggbot\",\"shape\":\"blob\",\"color\":\"#F5E6C8\",\"accent\":\"#FB923C\",\"default_voice_id\":\"placeholder-playful\"},"
-    "{\"id\":\"pulse\",\"name\":\"Pulse\",\"shape\":\"ring\",\"color\":\"#EF4444\",\"accent\":\"#FECACA\",\"default_voice_id\":\"placeholder-crisp\"},"
-    "{\"id\":\"proton\",\"name\":\"Proton\",\"shape\":\"octagon\",\"color\":\"#22C55E\",\"accent\":\"#BBF7D0\",\"default_voice_id\":\"placeholder-deep\"},"
-    "{\"id\":\"clay\",\"name\":\"Clay\",\"shape\":\"pill\",\"color\":\"#C2410C\",\"accent\":\"#FED7AA\",\"default_voice_id\":\"placeholder-warm\"},"
-    "{\"id\":\"nexus\",\"name\":\"Nexus\",\"shape\":\"triangle\",\"color\":\"#EC4899\",\"accent\":\"#FBCFE8\",\"default_voice_id\":\"placeholder-calm\"}"
+    "{\"id\":\"meridian\",\"name\":\"Meridian\",\"shape\":\"blob\",\"color\":\"#9CA3AF\",\"accent\":\"#E5E7EB\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":11,\"avatar_tbd\":false,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"spark\",\"name\":\"Spark\",\"shape\":\"circle\",\"color\":\"#64748B\",\"accent\":\"#CBD5E1\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":33,\"avatar_tbd\":true,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"quark\",\"name\":\"Quark\",\"shape\":\"circle\",\"color\":\"#64748B\",\"accent\":\"#CBD5E1\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":36,\"avatar_tbd\":true,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"scribe\",\"name\":\"Scribe\",\"shape\":\"teardrop\",\"color\":\"#1E1F24\",\"accent\":\"#9CA3AF\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":120,\"avatar_tbd\":false,\"rim\":\"#5B616B\",\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"photon\",\"name\":\"Photon\",\"shape\":\"teardrop\",\"color\":\"#FACC15\",\"accent\":\"#FEF9C3\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":152,\"avatar_tbd\":false,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"dr_eggbot\",\"name\":\"dr eggbot\",\"shape\":\"teardrop\",\"color\":\"#EF4444\",\"accent\":\"#FECACA\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":173,\"avatar_tbd\":false,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"pulse\",\"name\":\"Pulse\",\"shape\":\"cloud\",\"color\":\"#3B82F6\",\"accent\":\"#BFDBFE\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":41,\"avatar_tbd\":false,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"proton\",\"name\":\"Proton\",\"shape\":\"hex\",\"color\":\"#22C55E\",\"accent\":\"#BBF7D0\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":162,\"avatar_tbd\":false,\"default_voice_id\":\"eve\"}"
+    ","
+    "{\"id\":\"clay\",\"name\":\"Clay\",\"shape\":\"squircle\",\"color\":\"#8B5A2B\",\"accent\":\"#E7C9A0\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":169,\"avatar_tbd\":false,\"default_voice_id\":\"cosmo\"}"
+    ","
+    "{\"id\":\"nexus\",\"name\":\"Nexus\",\"shape\":\"blob\",\"color\":\"#8B5CF6\",\"accent\":\"#DDD6FE\",\"shape_scale\":86,\"shape_rotation\":0,\"shape_wobble\":50,\"shape_seed\":97,\"avatar_tbd\":false,\"default_voice_id\":\"eve\"}"
     "]}";
 
+/* The Grok Bot app voice list (xAI grok-tts ids). Mirrors relay/voices.json. */
 static const char *BUILTIN_VOICES_JSON =
-    "{\"placeholder\":true,\"voices\":["
-    "{\"id\":\"placeholder-calm\",\"name\":\"Calm (placeholder)\",\"description\":\"Placeholder: even, unhurried delivery.\"},"
-    "{\"id\":\"placeholder-warm\",\"name\":\"Warm (placeholder)\",\"description\":\"Placeholder: friendly, softer tone.\"},"
-    "{\"id\":\"placeholder-bright\",\"name\":\"Bright (placeholder)\",\"description\":\"Placeholder: upbeat, energetic.\"},"
-    "{\"id\":\"placeholder-crisp\",\"name\":\"Crisp (placeholder)\",\"description\":\"Placeholder: clear and concise.\"},"
-    "{\"id\":\"placeholder-deep\",\"name\":\"Deep (placeholder)\",\"description\":\"Placeholder: lower pitch.\"},"
-    "{\"id\":\"placeholder-playful\",\"name\":\"Playful (placeholder)\",\"description\":\"Placeholder: lighter, more animated.\"}"
+    "{\"placeholder\":false,\"voices\":["
+    "{\"id\":\"altair\",\"name\":\"Altair\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"ara\",\"name\":\"Ara\",\"description\":\"Warm and friendly\"}"
+    ","
+    "{\"id\":\"atlas\",\"name\":\"Atlas\",\"description\":\"Confident, commanding\"}"
+    ","
+    "{\"id\":\"aurora\",\"name\":\"Aurora\",\"description\":\"Serene, steady\"}"
+    ","
+    "{\"id\":\"carina\",\"name\":\"Carina\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"castor\",\"name\":\"Castor\",\"description\":\"Charismatic, easygoing\"}"
+    ","
+    "{\"id\":\"celeste\",\"name\":\"Celeste\",\"description\":\"Compassionate, reassuring\"}"
+    ","
+    "{\"id\":\"cosmo\",\"name\":\"Cosmo\",\"description\":\"Bright, curious\"}"
+    ","
+    "{\"id\":\"eve\",\"name\":\"Eve\",\"description\":\"Energetic and upbeat (default)\"}"
+    ","
+    "{\"id\":\"helios\",\"name\":\"Helios\",\"description\":\"Upbeat, energetic\"}"
+    ","
+    "{\"id\":\"helix\",\"name\":\"Helix\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"iris\",\"name\":\"Iris\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"kepler\",\"name\":\"Kepler\",\"description\":\"Inventive, charismatic\"}"
+    ","
+    "{\"id\":\"leo\",\"name\":\"Leo\",\"description\":\"Authoritative and strong\"}"
+    ","
+    "{\"id\":\"liora\",\"name\":\"Liora\",\"description\":\"Calm, grounded\"}"
+    ","
+    "{\"id\":\"lumen\",\"name\":\"Lumen\",\"description\":\"Warm, articulate\"}"
+    ","
+    "{\"id\":\"luna\",\"name\":\"Luna\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"lux\",\"name\":\"Lux\",\"description\":\"Grounded, calm\"}"
+    ","
+    "{\"id\":\"naksh\",\"name\":\"Naksh\",\"description\":\"Warm, thoughtful (Indian)\"}"
+    ","
+    "{\"id\":\"orion\",\"name\":\"Orion\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"perseus\",\"name\":\"Perseus\",\"description\":\"Strong, confident\"}"
+    ","
+    "{\"id\":\"rex\",\"name\":\"Rex\",\"description\":\"Confident and clear\"}"
+    ","
+    "{\"id\":\"rigel\",\"name\":\"Rigel\",\"description\":\"Precise, calm (Australian)\"}"
+    ","
+    "{\"id\":\"sal\",\"name\":\"Sal\",\"description\":\"Smooth and balanced\"}"
+    ","
+    "{\"id\":\"sirius\",\"name\":\"Sirius\",\"description\":\"Quick-witted, playful\"}"
+    ","
+    "{\"id\":\"ursa\",\"name\":\"Ursa\",\"description\":\"Friendly, warm\"}"
+    ","
+    "{\"id\":\"zagan\",\"name\":\"Zagan\",\"description\":\"\"}"
+    ","
+    "{\"id\":\"zenith\",\"name\":\"Zenith\",\"description\":\"\"}"
     "]}";
 
 /* ---------------------------------------------------------------- helpers */
 
 static const char *SHAPE_NAMES[BOT_SHAPE_COUNT] = {
-    "circle", "squircle", "hexagon", "diamond", "triangle",
-    "star", "ring", "pill", "octagon", "blob",
+    "circle", "blob", "teardrop", "cloud", "hex", "squircle",
 };
 
 bot_shape_t bot_shape_from_str(const char *s)
@@ -60,6 +119,7 @@ bot_shape_t bot_shape_from_str(const char *s)
         for (int i = 0; i < BOT_SHAPE_COUNT; i++) {
             if (strcmp(s, SHAPE_NAMES[i]) == 0) return (bot_shape_t)i;
         }
+        if (strcmp(s, "hexagon") == 0) return BOT_SHAPE_HEX;
     }
     return BOT_SHAPE_CIRCLE;
 }
@@ -81,6 +141,14 @@ static const char *jstr(const cJSON *obj, const char *key)
 {
     const cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
     return cJSON_IsString(it) ? it->valuestring : NULL;
+}
+
+static int jint(const cJSON *obj, const char *key, int lo, int hi, int def)
+{
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!cJSON_IsNumber(it)) return def;
+    int v = (int)it->valuedouble;
+    return v < lo ? lo : (v > hi ? hi : v);
 }
 
 /* ---------------------------------------------------------------- bots */
@@ -111,6 +179,13 @@ static esp_err_t parse_bots(const char *json, size_t len, bot_info_t *out, int *
         bi->shape = bot_shape_from_str(jstr(b, "shape"));
         bi->color = bot_color_from_hex(jstr(b, "color"), 0x888888);
         bi->accent = bot_color_from_hex(jstr(b, "accent"), 0xFFFFFF);
+        bi->has_rim = jstr(b, "rim") != NULL;
+        bi->rim = bot_color_from_hex(jstr(b, "rim"), 0x5B616B);
+        bi->scale_pct = (uint8_t)jint(b, "shape_scale", 50, 100, 86);
+        bi->rotation = (int16_t)jint(b, "shape_rotation", -180, 180, 0);
+        bi->wobble = (uint8_t)jint(b, "shape_wobble", 0, 100, 50);
+        bi->seed = (uint8_t)jint(b, "shape_seed", 0, 255, 0);
+        bi->tbd = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(b, "avatar_tbd"));
         const char *dv = jstr(b, "default_voice_id");
         if (dv) strlcpy(bi->default_voice_id, dv, sizeof(bi->default_voice_id));
         n++;
@@ -175,6 +250,7 @@ esp_err_t voice_registry_update_from_json(const char *json, size_t len, bool per
         if (jstr(v, "description")) {
             strlcpy(tmp[n].description, jstr(v, "description"), sizeof(tmp[n].description));
         }
+        tmp[n].has_sample = jstr(v, "sample_path") != NULL;
         n++;
     }
     const cJSON *ph = cJSON_GetObjectItemCaseSensitive(root, "placeholder");

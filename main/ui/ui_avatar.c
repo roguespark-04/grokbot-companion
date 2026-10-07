@@ -1,53 +1,68 @@
 /**
- * Procedural avatar renderer (LVGL 9).
+ * Procedural full-screen avatar renderer (LVGL 9). See ui_avatar.h.
+ *
+ * All geometry is in "unit" space (body radius = 1, y down) and scaled at draw time, so
+ * one code path serves the 400 px home avatar and the shrunken neighbours mid-swipe.
+ * Shapes are star-shaped polygons around a fan centre, filled as triangle fans.
+ *
+ * PERF TODO (hardware): the body is repainted on every animation tick. If the CO5300
+ * QSPI flush can't keep ~30 fps for a 400 px region, cache the silhouette per (bot,
+ * scale step) in a PSRAM A8 mask and only repaint eyes/mouth/rings.
  */
 #include "ui_avatar.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ui_theme.h"
 
-#define RING_COUNT  3
-#define DOT_COUNT   3
+#define OUTLINE_N   48
+#define PI_F        3.14159265f
 
 struct ui_avatar {
     const ui_avatar_renderer_t *r;
     lv_obj_t   *root;
-    lv_obj_t   *body;
-    lv_obj_t   *eye[2];
-    lv_obj_t   *mouth;
-    lv_obj_t   *ring[RING_COUNT];
-    lv_obj_t   *dot[DOT_COUNT];
     lv_timer_t *level_timer;
     bot_info_t  bot;
     avatar_anim_t anim;
-    int32_t     base_scale;   /* 256 = 1.0 (carousel peek) */
+    int32_t     base_scale;   /* 256 = 1.0 */
     int32_t     breath;       /* 0..1000 */
+    int32_t     blink;        /* 0 open .. 1000 closed */
+    int32_t     ripple;       /* 0..1000 */
+    int32_t     orbit;        /* 0..3600 (0.1 deg) */
+    int32_t     morph;        /* 0..3600 (0.1 deg) blob/cloud outline drift */
+    int32_t     glow_ph;      /* 0..1000 */
     int32_t     level_target;
     int32_t     level_cur;
+    float       speak_ph;
+    bool        glow;
     bool        error_tint;
+    bool        orbit_on, ripple_on, mouth_on;
+    uint32_t    orbit_rgb;
 };
 
-/* Per-shape face placement (data-driven; tweak without touching draw code). */
+/* Face placement per shape, in unit space (data-driven: tune without touching draw code). */
 typedef struct {
-    int8_t eye_dy;     /* px from body center */
-    int8_t eye_gap;    /* half distance between eyes */
-    uint8_t eye_w, eye_h;
-    bool shine;        /* accent highlight (off where it would poke outside the silhouette) */
+    float eye_y, eye_gap, eye_w, eye_h, mouth_y;
+    bool  shine;
+    float shine_x, shine_y;
 } shape_face_t;
 
 static const shape_face_t SHAPE_FACE[BOT_SHAPE_COUNT] = {
-    [BOT_SHAPE_CIRCLE]   = {-8, 24, 16, 22, true},
-    [BOT_SHAPE_SQUIRCLE] = {-8, 26, 16, 22, true},
-    [BOT_SHAPE_HEXAGON]  = {-6, 24, 16, 22, true},
-    [BOT_SHAPE_DIAMOND]  = {-4, 20, 14, 20, false},
-    [BOT_SHAPE_TRIANGLE] = {14, 18, 14, 18, false},
-    [BOT_SHAPE_STAR]     = {-2, 16, 12, 18, false},
-    [BOT_SHAPE_RING]     = {-6, 18, 12, 18, false},
-    [BOT_SHAPE_PILL]     = {-6, 30, 16, 20, true},
-    [BOT_SHAPE_OCTAGON]  = {-8, 24, 16, 22, true},
-    [BOT_SHAPE_BLOB]     = {-2, 20, 14, 20, true},
+    [BOT_SHAPE_CIRCLE]   = {-0.08f, 0.30f, 0.15f, 0.23f, 0.34f, true, -0.40f, -0.46f},
+    [BOT_SHAPE_BLOB]     = {-0.06f, 0.29f, 0.15f, 0.23f, 0.34f, true, -0.38f, -0.44f},
+    [BOT_SHAPE_TEARDROP] = { 0.10f, 0.25f, 0.14f, 0.21f, 0.33f, true, -0.36f,  0.00f},
+    [BOT_SHAPE_CLOUD]    = { 0.04f, 0.28f, 0.14f, 0.21f, 0.34f, true, -0.30f, -0.44f},
+    [BOT_SHAPE_HEX]      = {-0.06f, 0.28f, 0.15f, 0.23f, 0.34f, true, -0.36f, -0.42f},
+    [BOT_SHAPE_SQUIRCLE] = {-0.08f, 0.30f, 0.15f, 0.23f, 0.34f, true, -0.42f, -0.46f},
 };
+
+/* Cloud = union of puffs (cx, cy, r) in unit space; base row + three top puffs. */
+static const float CLOUD_PUFFS[][3] = {
+    {-0.46f, 0.28f, 0.42f}, {0.46f, 0.28f, 0.42f}, {0.00f, 0.30f, 0.50f},
+    {-0.42f, -0.06f, 0.40f}, {0.02f, -0.32f, 0.52f}, {0.46f, -0.08f, 0.38f},
+};
+#define CLOUD_PUFF_N (sizeof(CLOUD_PUFFS) / sizeof(CLOUD_PUFFS[0]))
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -59,345 +74,333 @@ static bool is_light(uint32_t rgb)
     return (r * 299 + g * 587 + b * 114) / 1000 > 150;
 }
 
-static void apply_scale(ui_avatar_t *av)
+static void redraw(ui_avatar_t *av) { lv_obj_invalidate(av->root); }
+
+static float wob(const ui_avatar_t *av) { return av->bot.wobble / 50.0f; }
+
+/** Unit-space outline. Returns fan centre in *fx,*fy (unit space). */
+static void shape_outline(const ui_avatar_t *av, float ux[OUTLINE_N], float uy[OUTLINE_N],
+                          float *fx, float *fy)
 {
-    /* breath: up to +5 %, speaking level: up to +19 % */
-    int32_t s = 256 + (av->breath * 13) / 1000 + (av->level_cur * 48) / 255;
-    s = (s * av->base_scale) / 256;
-    lv_obj_set_style_transform_scale(av->body, s, 0);
+    const float m = av->morph * (2 * PI_F / 3600.0f);
+    const float seed = av->bot.seed * 0.0245f;   /* 0..2pi */
+    *fx = 0;
+    *fy = 0;
+    for (int i = 0; i < OUTLINE_N; i++) {
+        float t = 2 * PI_F * i / OUTLINE_N;
+        float c = cosf(t), s = sinf(t), x, y;
+        switch (av->bot.shape) {
+        case BOT_SHAPE_BLOB: {
+            float w = wob(av);
+            float rr = 1 + w * (0.05f * sinf(2 * t + seed + m) + 0.04f * sinf(3 * t + 2 * seed - m) +
+                                0.025f * sinf(5 * t + 3 * seed + 2 * m));
+            rr /= 1 + w * 0.115f;
+            x = c * rr;
+            y = s * rr;
+            break;
+        }
+        case BOT_SHAPE_TEARDROP: {
+            /* x = sin t * sin(t/2), y = -cos t: soft point at the top, round bottom */
+            x = 0.95f * s * sinf(t / 2);
+            y = -0.95f * c;
+            *fy = 0.30f;
+            break;
+        }
+        case BOT_SHAPE_CLOUD: {
+            /* ray-cast the union of puffs from the origin (inside the centre puff) */
+            float best = 0.3f, w = wob(av);
+            for (size_t k = 0; k < CLOUD_PUFF_N; k++) {
+                float px = CLOUD_PUFFS[k][0], py = CLOUD_PUFFS[k][1];
+                float pr = CLOUD_PUFFS[k][2] * (1 + 0.02f * w * sinf(m + k));
+                float b = px * c + py * s;
+                float disc = b * b - (px * px + py * py - pr * pr);
+                if (disc >= 0) {
+                    float d = b + sqrtf(disc);
+                    if (d > best) best = d;
+                }
+            }
+            x = c * best;
+            y = s * best;
+            break;
+        }
+        case BOT_SHAPE_HEX: {
+            /* pointy-top hexagon, corners softened by clipping to a circle */
+            float a = fmodf(t + PI_F / 2 + 2 * PI_F, PI_F / 3);
+            float rr = cosf(PI_F / 6) / cosf(a - PI_F / 6);
+            if (rr > 0.95f) rr = 0.95f;
+            rr /= 0.95f;
+            x = c * rr;
+            y = s * rr;
+            break;
+        }
+        case BOT_SHAPE_SQUIRCLE: {
+            /* superellipse n = 4 */
+            x = 0.92f * copysignf(sqrtf(fabsf(c)), c);
+            y = 0.92f * copysignf(sqrtf(fabsf(s)), s);
+            break;
+        }
+        case BOT_SHAPE_CIRCLE:
+        default:
+            x = c;
+            y = s;
+            break;
+        }
+        if (av->bot.rotation) {
+            float ra = av->bot.rotation * PI_F / 180.0f, cr = cosf(ra), sr = sinf(ra);
+            float nx = x * cr - y * sr, ny = x * sr + y * cr;
+            x = nx;
+            y = ny;
+        }
+        ux[i] = x;
+        uy[i] = y;
+    }
+}
+
+static void fill_ellipse(lv_layer_t *layer, int32_t cx, int32_t cy, int32_t w, int32_t h,
+                         lv_color_t col, lv_opa_t opa)
+{
+    if (w < 1 || h < 1) return;
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.bg_color = col;
+    d.bg_opa = opa;
+    d.radius = LV_RADIUS_CIRCLE;
+    lv_area_t a = {cx - w / 2, cy - h / 2, cx - w / 2 + w - 1, cy - h / 2 + h - 1};
+    lv_draw_rect(layer, &d, &a);
+}
+
+static void ring(lv_layer_t *layer, int32_t cx, int32_t cy, int32_t r, int32_t width,
+                 lv_color_t col, lv_opa_t opa)
+{
+    if (opa <= LV_OPA_MIN || r <= width) return;
+    lv_draw_arc_dsc_t d;
+    lv_draw_arc_dsc_init(&d);
+    d.center.x = cx;
+    d.center.y = cy;
+    d.radius = (uint16_t)r;
+    d.width = width;
+    d.start_angle = 0;
+    d.end_angle = 360;
+    d.color = col;
+    d.opa = opa;
+    lv_draw_arc(layer, &d);
 }
 
 /* ------------------------------------------------------------------ drawing */
 
-static void fill_rect(lv_layer_t *layer, const lv_area_t *a, lv_color_t col, lv_opa_t opa,
-                      int32_t radius, int32_t border)
+static void draw_cb(lv_event_t *e)
 {
-    lv_draw_rect_dsc_t d;
-    lv_draw_rect_dsc_init(&d);
-    d.radius = radius;
-    if (border > 0) {
-        d.bg_opa = LV_OPA_TRANSP;
-        d.border_color = col;
-        d.border_opa = opa;
-        d.border_width = border;
-    } else {
-        d.bg_color = col;
-        d.bg_opa = opa;
-    }
-    lv_draw_rect(layer, &d, a);
-}
+    ui_avatar_t *av = lv_event_get_user_data(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(av->root, &a);
+    const int32_t cx = a.x1 + lv_area_get_width(&a) / 2;
+    const int32_t cy = a.y1 + lv_area_get_height(&a) / 2;
+    const shape_face_t *f = &SHAPE_FACE[av->bot.shape < BOT_SHAPE_COUNT ? av->bot.shape : 0];
 
-static void fill_polygon(lv_layer_t *layer, int32_t cx, int32_t cy, const lv_point_t *v, int n,
-                         lv_color_t col)
-{
+    float R = (UI_W / 2.0f) * (av->bot.scale_pct ? av->bot.scale_pct : 86) / 100.0f;
+    R *= 1 + av->breath * 0.025f / 1000 + av->level_cur * 0.06f / 255;
+    R *= av->base_scale / 256.0f;
+
+    uint32_t body_rgb = av->bot.color;
+    lv_color_t body = av->error_tint ? lv_color_mix(c24(0xDC2626), c24(body_rgb), 170) : c24(body_rgb);
+    lv_color_t accent = c24(av->bot.accent);
+    lv_color_t eye = c24(is_light(body_rgb) && !av->error_tint ? 0x111318 : 0xFFFFFF);
+
+    /* conversation-open cue: soft accent pulse along the round screen edge (centred on
+     * the parent = the screen, even though the avatar itself sits slightly high) */
+    if (av->glow) {
+        lv_area_t pa;
+        lv_obj_get_coords(lv_obj_get_parent(av->root), &pa);
+        int32_t gx = pa.x1 + lv_area_get_width(&pa) / 2, gy = pa.y1 + lv_area_get_height(&pa) / 2;
+        lv_opa_t go = (lv_opa_t)(45 + (70 * av->glow_ph) / 1000);
+        ring(layer, gx, gy, UI_W / 2 - 1, 7, accent, go);
+        ring(layer, gx, gy, UI_W / 2 - 8, 6, accent, go / 3);
+    }
+
+    /* listening ripples between the body and the screen edge */
+    if (av->ripple_on) {
+        for (int k = 0; k < 3; k++) {
+            int32_t ph = (av->ripple + k * 333) % 1000;
+            int32_t rr = (int32_t)(R * (1.0f + 0.16f * ph / 1000));
+            if (rr > UI_W / 2 - 3) rr = UI_W / 2 - 3;
+            ring(layer, cx, cy, rr, 4, accent, (lv_opa_t)(200 * (1000 - ph) / 1000));
+        }
+    }
+
+    /* body */
+    float ux[OUTLINE_N], uy[OUTLINE_N], fx, fy;
+    shape_outline(av, ux, uy, &fx, &fy);
+    lv_point_t pts[OUTLINE_N];
+    for (int i = 0; i < OUTLINE_N; i++) {
+        pts[i].x = cx + (int32_t)lroundf(ux[i] * R);
+        pts[i].y = cy + (int32_t)lroundf(uy[i] * R);
+    }
     lv_draw_triangle_dsc_t t;
     lv_draw_triangle_dsc_init(&t);
-    t.color = col;
+    t.color = body;
     t.opa = LV_OPA_COVER;
-    /* Fan from the center (all our polygons are star-shaped around it). Drawn twice so
-     * anti-aliased seams between neighbouring triangles disappear. */
-    for (int pass = 0; pass < 2; pass++) {
-        for (int i = 0; i < n; i++) {
-            const lv_point_t *a = &v[i];
-            const lv_point_t *b = &v[(i + 1) % n];
-            t.p[0].x = cx;   t.p[0].y = cy;
-            t.p[1].x = a->x; t.p[1].y = a->y;
-            t.p[2].x = b->x; t.p[2].y = b->y;
+    const int32_t fcx = cx + (int32_t)(fx * R), fcy = cy + (int32_t)(fy * R);
+    for (int pass = 0; pass < 2; pass++) {   /* 2nd pass hides anti-aliased fan seams */
+        for (int i = 0; i < OUTLINE_N; i++) {
+            const lv_point_t *p = &pts[i], *q = &pts[(i + 1) % OUTLINE_N];
+            t.p[0].x = fcx;  t.p[0].y = fcy;
+            t.p[1].x = p->x; t.p[1].y = p->y;
+            t.p[2].x = q->x; t.p[2].y = q->y;
             lv_draw_triangle(layer, &t);
         }
     }
-}
-
-static int regular_poly(lv_point_t *out, int n, int32_t cx, int32_t cy, int32_t r,
-                        int32_t start_deg, int32_t inner_r)
-{
-    int cnt = 0;
-    int steps = inner_r ? n * 2 : n;
-    for (int i = 0; i < steps; i++) {
-        int32_t ang = start_deg + (360 * i) / steps;
-        int32_t rr = (inner_r && (i & 1)) ? inner_r : r;
-        out[cnt].x = cx + (lv_trigo_cos((int16_t)ang) * rr) / LV_TRIGO_SIN_MAX;
-        out[cnt].y = cy + (lv_trigo_sin((int16_t)ang) * rr) / LV_TRIGO_SIN_MAX;
-        cnt++;
+    /* light rim so dark bodies (e.g. black) stay visible on the black AMOLED */
+    if (av->bot.has_rim) {
+        lv_draw_line_dsc_t l;
+        lv_draw_line_dsc_init(&l);
+        l.color = c24(av->bot.rim);
+        l.width = LV_MAX(2, (int32_t)(R * 0.015f));
+        l.opa = LV_OPA_COVER;
+        l.round_start = l.round_end = 1;
+        for (int i = 0; i < OUTLINE_N; i++) {
+            const lv_point_t *p = &pts[i], *q = &pts[(i + 1) % OUTLINE_N];
+            l.p1.x = p->x; l.p1.y = p->y;
+            l.p2.x = q->x; l.p2.y = q->y;
+            lv_draw_line(layer, &l);
+        }
     }
-    return cnt;
-}
-
-static void draw_body_cb(lv_event_t *e)
-{
-    ui_avatar_t *av = lv_event_get_user_data(e);
-    lv_obj_t *obj = lv_event_get_target_obj(e);
-    lv_layer_t *layer = lv_event_get_layer(e);
-    lv_area_t a;
-    lv_obj_get_coords(obj, &a);
-    int32_t w = lv_area_get_width(&a), h = lv_area_get_height(&a);
-    int32_t cx = a.x1 + w / 2, cy = a.y1 + h / 2, r = w / 2;
-    uint32_t base = av->error_tint ? 0xDC2626 : av->bot.color;
-    lv_color_t col = c24(base);
-    lv_point_t v[16];
-    int n = 0;
-
-    switch (av->bot.shape) {
-    case BOT_SHAPE_SQUIRCLE:
-        fill_rect(layer, &a, col, LV_OPA_COVER, w * 28 / 100, 0);
-        break;
-    case BOT_SHAPE_PILL: {
-        lv_area_t p = a;
-        p.y1 = cy - h * 33 / 100;
-        p.y2 = cy + h * 33 / 100;
-        fill_rect(layer, &p, col, LV_OPA_COVER, LV_RADIUS_CIRCLE, 0);
-        break;
+    if (f->shine) {
+        fill_ellipse(layer, cx + (int32_t)(f->shine_x * R), cy + (int32_t)(f->shine_y * R),
+                     (int32_t)(0.26f * R), (int32_t)(0.14f * R), accent, LV_OPA_30);
     }
-    case BOT_SHAPE_BLOB: {   /* egg: tall capsule, slightly narrower */
-        lv_area_t p = a;
-        p.x1 = cx - w * 40 / 100;
-        p.x2 = cx + w * 40 / 100;
-        fill_rect(layer, &p, col, LV_OPA_COVER, LV_RADIUS_CIRCLE, 0);
-        break;
-    }
-    case BOT_SHAPE_RING:
-        fill_rect(layer, &a, col, LV_OPA_COVER, LV_RADIUS_CIRCLE, w * 17 / 100);
-        break;
-    case BOT_SHAPE_HEXAGON:
-        n = regular_poly(v, 6, cx, cy, r, -90, 0);
-        break;
-    case BOT_SHAPE_OCTAGON:
-        n = regular_poly(v, 8, cx, cy, r, -90 + 22, 0);
-        break;
-    case BOT_SHAPE_DIAMOND:
-        n = regular_poly(v, 4, cx, cy, r, -90, 0);
-        break;
-    case BOT_SHAPE_TRIANGLE:
-        n = regular_poly(v, 3, cx, cy + r / 6, r + r / 8, -90, 0);
-        cy += r / 6;
-        break;
-    case BOT_SHAPE_STAR:
-        n = regular_poly(v, 5, cx, cy, r, -90, r * 50 / 100);
-        break;
-    case BOT_SHAPE_CIRCLE:
-    default:
-        fill_rect(layer, &a, col, LV_OPA_COVER, LV_RADIUS_CIRCLE, 0);
-        break;
-    }
-    if (n) fill_polygon(layer, cx, cy, v, n, col);
 
-    /* soft shine (accent) where it stays inside the silhouette */
-    if (SHAPE_FACE[av->bot.shape].shine) {
-        lv_area_t s = {
-            .x1 = cx - w * 30 / 100, .y1 = cy - h * 34 / 100,
-            .x2 = cx - w * 8 / 100,  .y2 = cy - h * 20 / 100,
-        };
-        fill_rect(layer, &s, c24(av->bot.accent), LV_OPA_40, LV_RADIUS_CIRCLE, 0);
+    /* eyes */
+    int32_t ew = (int32_t)(f->eye_w * R), eh_full = (int32_t)(f->eye_h * R);
+    int32_t eh = eh_full - (eh_full * 85 * av->blink) / (100 * 1000);
+    if (eh < 3) eh = 3;
+    int32_t ey = cy + (int32_t)(f->eye_y * R), gap = (int32_t)(f->eye_gap * R);
+    fill_ellipse(layer, cx - gap, ey, ew, eh, eye, LV_OPA_COVER);
+    fill_ellipse(layer, cx + gap, ey, ew, eh, eye, LV_OPA_COVER);
+
+    /* speaking: waveform mouth driven by the playback level */
+    if (av->mouth_on) {
+        int32_t my = cy + (int32_t)(f->mouth_y * R);
+        int32_t bw = LV_MAX(4, (int32_t)(0.065f * R)), bg = (int32_t)(0.045f * R);
+        for (int k = -2; k <= 2; k++) {
+            float wave = 0.55f + 0.45f * sinf(av->speak_ph + k * 1.3f);
+            int32_t bh = (int32_t)(0.05f * R + (av->level_cur / 255.0f) * 0.16f * R * wave);
+            fill_ellipse(layer, cx + k * (bw + bg), my, bw, LV_MAX(bw, bh), eye, LV_OPA_COVER);
+        }
+    }
+
+    /* thinking / working: comet of dots orbiting the screen rim (screen-centred) */
+    if (av->orbit_on) {
+        lv_area_t pa;
+        lv_obj_get_coords(lv_obj_get_parent(av->root), &pa);
+        int32_t ox = pa.x1 + lv_area_get_width(&pa) / 2;
+        int32_t oy = pa.y1 + lv_area_get_height(&pa) / 2;
+        int32_t rad = UI_W / 2 - 14;
+        for (int k = 0; k < 3; k++) {
+            float ang = (av->orbit / 10.0f - k * 22.0f) * PI_F / 180.0f;
+            int32_t sz = 14 - k * 3;
+            fill_ellipse(layer, ox + (int32_t)(cosf(ang) * rad), oy + (int32_t)(sinf(ang) * rad), sz, sz,
+                         c24(av->orbit_rgb), (lv_opa_t)(255 - k * 60));
+        }
     }
 }
 
 /* ------------------------------------------------------------------ animations */
 
-static void breath_exec(void *var, int32_t v)
-{
-    ui_avatar_t *av = var;
-    av->breath = v;
-    apply_scale(av);
-}
-
-static void ring_exec(void *var, int32_t v)
-{
-    lv_obj_t *ring = var;
-    int32_t s = UI_AVATAR_BODY + ((UI_AVATAR_BOX - UI_AVATAR_BODY) * v) / 1000;
-    lv_obj_set_size(ring, s, s);
-    lv_obj_set_style_border_opa(ring, (lv_opa_t)(220 * (1000 - v) / 1000), 0);
-}
-
-static void orbit_exec(void *var, int32_t v)
-{
-    ui_avatar_t *av = var;
-    int32_t rad = UI_AVATAR_BODY / 2 + 26;
-    for (int i = 0; i < DOT_COUNT; i++) {
-        int16_t ang = (int16_t)((v / 10 + i * 120) % 360);
-        int32_t x = (lv_trigo_cos(ang) * rad) / LV_TRIGO_SIN_MAX;
-        int32_t y = (lv_trigo_sin(ang) * rad) / LV_TRIGO_SIN_MAX;
-        lv_obj_align(av->dot[i], LV_ALIGN_CENTER, x, y);
+#define EXEC(name, field)                                   \
+    static void name(void *var, int32_t v)                  \
+    {                                                       \
+        ui_avatar_t *av = var;                              \
+        av->field = v;                                      \
+        redraw(av);                                         \
     }
-}
-
-static void eye_exec(void *var, int32_t v)
-{
-    lv_obj_set_height((lv_obj_t *)var, v);
-}
+EXEC(breath_exec, breath)
+EXEC(blink_exec, blink)
+EXEC(ripple_exec, ripple)
+EXEC(orbit_exec, orbit)
+EXEC(morph_exec, morph)
+EXEC(glow_exec, glow_ph)
 
 static void shake_exec(void *var, int32_t v)
 {
     lv_obj_set_style_translate_x((lv_obj_t *)var, v, 0);
 }
 
-static void level_timer_cb(lv_timer_t *t)
+static void run(ui_avatar_t *av, lv_anim_exec_xcb_t cb, int32_t from, int32_t to, uint32_t ms,
+                uint32_t back_ms, uint32_t delay, uint32_t repeat_delay, lv_anim_path_cb_t path)
 {
-    ui_avatar_t *av = lv_timer_get_user_data(t);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, av);
+    lv_anim_set_exec_cb(&a, cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, ms);
+    if (back_ms) lv_anim_set_reverse_duration(&a, back_ms);
+    lv_anim_set_delay(&a, delay);
+    lv_anim_set_repeat_delay(&a, repeat_delay);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    if (path) lv_anim_set_path_cb(&a, path);
+    lv_anim_start(&a);
+}
+
+static void level_timer_cb(lv_timer_t *tm)
+{
+    ui_avatar_t *av = lv_timer_get_user_data(tm);
     int32_t d = av->level_target - av->level_cur;
     av->level_cur += d / 3 + (d > 0 ? 1 : (d < 0 ? -1 : 0));
     if (av->level_cur < 0) av->level_cur = 0;
-    if (av->mouth) {
-        lv_obj_set_height(av->mouth, 4 + (av->level_cur * 20) / 255);
-    }
-    apply_scale(av);
+    av->speak_ph += 0.45f;
+    if (av->speak_ph > 2 * PI_F * 100) av->speak_ph = 0;
+    redraw(av);
 }
 
 static void stop_all(ui_avatar_t *av)
 {
-    lv_anim_delete(av, NULL);
-    for (int i = 0; i < RING_COUNT; i++) {
-        lv_anim_delete(av->ring[i], NULL);
-        lv_obj_add_flag(av->ring[i], LV_OBJ_FLAG_HIDDEN);
-    }
-    for (int i = 0; i < DOT_COUNT; i++) lv_obj_add_flag(av->dot[i], LV_OBJ_FLAG_HIDDEN);
-    for (int i = 0; i < 2; i++) {
-        lv_anim_delete(av->eye[i], NULL);
-        lv_obj_set_height(av->eye[i], SHAPE_FACE[av->bot.shape].eye_h);
-    }
-    lv_anim_delete(av->root, NULL);
+    lv_anim_delete(av, breath_exec);
+    lv_anim_delete(av, blink_exec);
+    lv_anim_delete(av, ripple_exec);
+    lv_anim_delete(av, orbit_exec);
+    lv_anim_delete(av, morph_exec);
+    lv_anim_delete(av->root, shake_exec);
     lv_obj_set_style_translate_x(av->root, 0, 0);
-    lv_obj_add_flag(av->mouth, LV_OBJ_FLAG_HIDDEN);
     lv_timer_pause(av->level_timer);
-    av->breath = 0;
+    av->breath = av->blink = av->ripple = av->orbit = 0;
     av->level_cur = av->level_target = 0;
-    if (av->error_tint) {
-        av->error_tint = false;
-        lv_obj_invalidate(av->body);
-    }
-    apply_scale(av);
+    av->orbit_on = av->ripple_on = av->mouth_on = false;
+    av->error_tint = false;
+    redraw(av);
 }
 
-static void start_breath(ui_avatar_t *av, uint32_t period_ms)
+static void start_breath(ui_avatar_t *av, uint32_t ms)
 {
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, av);
-    lv_anim_set_exec_cb(&a, breath_exec);
-    lv_anim_set_values(&a, 0, 1000);
-    lv_anim_set_duration(&a, period_ms);
-    lv_anim_set_reverse_duration(&a, period_ms);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-    lv_anim_start(&a);
+    run(av, breath_exec, 0, 1000, ms, ms, 0, 0, lv_anim_path_ease_in_out);
 }
 
 static void start_blink(ui_avatar_t *av)
 {
-    int32_t h = SHAPE_FACE[av->bot.shape].eye_h;
-    for (int i = 0; i < 2; i++) {
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, av->eye[i]);
-        lv_anim_set_exec_cb(&a, eye_exec);
-        lv_anim_set_values(&a, h, 3);
-        lv_anim_set_duration(&a, 90);
-        lv_anim_set_reverse_duration(&a, 120);
-        lv_anim_set_repeat_delay(&a, 3800);
-        lv_anim_set_delay(&a, 1500);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_start(&a);
+    run(av, blink_exec, 0, 1000, 90, 120, 1500, 3800, NULL);
+}
+
+static void start_morph(ui_avatar_t *av, uint32_t ms)
+{
+    if (av->bot.shape == BOT_SHAPE_BLOB || av->bot.shape == BOT_SHAPE_CLOUD) {
+        run(av, morph_exec, 0, 3600, ms, 0, 0, 0, NULL);
     }
 }
 
-static void start_ripples(ui_avatar_t *av)
+static void start_orbit(ui_avatar_t *av, uint32_t ms, uint32_t rgb)
 {
-    for (int i = 0; i < RING_COUNT; i++) {
-        lv_obj_remove_flag(av->ring[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_border_color(av->ring[i], c24(av->bot.accent), 0);
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, av->ring[i]);
-        lv_anim_set_exec_cb(&a, ring_exec);
-        lv_anim_set_values(&a, 0, 1000);
-        lv_anim_set_duration(&a, 1500);
-        lv_anim_set_delay(&a, i * 500);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-        lv_anim_start(&a);
-    }
-}
-
-static void start_orbit(ui_avatar_t *av, uint32_t period_ms, lv_color_t col)
-{
-    for (int i = 0; i < DOT_COUNT; i++) {
-        lv_obj_remove_flag(av->dot[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_bg_color(av->dot[i], col, 0);
-    }
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, av);
-    lv_anim_set_exec_cb(&a, orbit_exec);
-    lv_anim_set_values(&a, 0, 3600);
-    lv_anim_set_duration(&a, period_ms);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&a);
-}
-
-static void start_shake(ui_avatar_t *av)
-{
-    av->error_tint = true;
-    lv_obj_invalidate(av->body);
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, av->root);
-    lv_anim_set_exec_cb(&a, shake_exec);
-    lv_anim_set_values(&a, -10, 10);
-    lv_anim_set_duration(&a, 70);
-    lv_anim_set_reverse_duration(&a, 70);
-    lv_anim_set_repeat_count(&a, 4);
-    lv_anim_start(&a);
+    av->orbit_on = true;
+    av->orbit_rgb = rgb;
+    run(av, orbit_exec, 0, 3600, ms, 0, 0, 0, NULL);
 }
 
 /* ------------------------------------------------------------------ renderer ops */
 
-static lv_obj_t *plain(lv_obj_t *parent)
-{
-    lv_obj_t *o = lv_obj_create(parent);
-    lv_obj_remove_style_all(o);
-    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    return o;
-}
-
 static void proc_build(ui_avatar_t *av)
 {
-    lv_obj_set_size(av->root, UI_AVATAR_BOX, UI_AVATAR_BOX);
-
-    for (int i = 0; i < RING_COUNT; i++) {
-        lv_obj_t *r = plain(av->root);
-        lv_obj_set_size(r, UI_AVATAR_BODY, UI_AVATAR_BODY);
-        lv_obj_align(r, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(r, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_width(r, 3, 0);
-        lv_obj_add_flag(r, LV_OBJ_FLAG_HIDDEN);
-        av->ring[i] = r;
-    }
-
-    av->body = plain(av->root);
-    lv_obj_set_size(av->body, UI_AVATAR_BODY, UI_AVATAR_BODY);
-    lv_obj_align(av->body, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_transform_pivot_x(av->body, UI_AVATAR_BODY / 2, 0);
-    lv_obj_set_style_transform_pivot_y(av->body, UI_AVATAR_BODY / 2, 0);
-    lv_obj_add_event_cb(av->body, draw_body_cb, LV_EVENT_DRAW_MAIN, av);
-
-    for (int i = 0; i < 2; i++) {
-        av->eye[i] = plain(av->body);
-        lv_obj_set_style_bg_opa(av->eye[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(av->eye[i], LV_RADIUS_CIRCLE, 0);
-    }
-    av->mouth = plain(av->body);
-    lv_obj_set_style_bg_opa(av->mouth, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(av->mouth, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_size(av->mouth, 30, 4);
-    lv_obj_add_flag(av->mouth, LV_OBJ_FLAG_HIDDEN);
-
-    for (int i = 0; i < DOT_COUNT; i++) {
-        lv_obj_t *d = plain(av->root);
-        lv_obj_set_size(d, 14 - i * 3, 14 - i * 3);
-        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
-        lv_obj_add_flag(d, LV_OBJ_FLAG_HIDDEN);
-        av->dot[i] = d;
-    }
+    lv_obj_set_size(av->root, UI_W, UI_H);
+    lv_obj_add_event_cb(av->root, draw_cb, LV_EVENT_DRAW_MAIN, av);
     av->level_timer = lv_timer_create(level_timer_cb, 33, av);
     lv_timer_pause(av->level_timer);
 }
@@ -406,20 +409,9 @@ static void proc_set_bot(ui_avatar_t *av, const bot_info_t *bot)
 {
     av->bot = *bot;
     if (av->bot.shape >= BOT_SHAPE_COUNT) av->bot.shape = BOT_SHAPE_CIRCLE;
-    const shape_face_t *f = &SHAPE_FACE[av->bot.shape];
-    uint32_t eye_rgb = (av->bot.shape == BOT_SHAPE_RING) ? av->bot.color
-                       : (is_light(av->bot.color) ? 0x111318 : 0xFFFFFF);
-    for (int i = 0; i < 2; i++) {
-        lv_obj_set_size(av->eye[i], f->eye_w, f->eye_h);
-        lv_obj_set_style_bg_color(av->eye[i], c24(eye_rgb), 0);
-        lv_obj_align(av->eye[i], LV_ALIGN_CENTER, i ? f->eye_gap : -f->eye_gap, f->eye_dy);
-    }
-    lv_obj_set_style_bg_color(av->mouth, c24(eye_rgb), 0);
-    lv_obj_align(av->mouth, LV_ALIGN_CENTER, 0, f->eye_dy + 30);
-    lv_obj_invalidate(av->body);
     avatar_anim_t cur = av->anim;
     av->anim = (avatar_anim_t)-1;
-    av->r->set_anim(av, cur);   /* restart with new colors */
+    av->r->set_anim(av, cur);   /* restart with new colours / shape */
 }
 
 static void proc_set_anim(ui_avatar_t *av, avatar_anim_t anim)
@@ -431,42 +423,65 @@ static void proc_set_anim(ui_avatar_t *av, avatar_anim_t anim)
     case AVATAR_ANIM_IDLE:
         start_breath(av, 2400);
         start_blink(av);
+        start_morph(av, 9000);
         break;
     case AVATAR_ANIM_LISTENING:
         start_breath(av, 1200);
-        start_ripples(av);
+        av->ripple_on = true;
+        run(av, ripple_exec, 0, 1000, 1500, 0, 0, 0, NULL);
+        start_morph(av, 4000);
         break;
     case AVATAR_ANIM_THINKING:
-        start_orbit(av, 1600, UI_COL_TEXT);
+        start_orbit(av, 1600, 0xF4F5F7);
         start_blink(av);
+        start_morph(av, 6000);
         break;
     case AVATAR_ANIM_WORKING:
-        start_orbit(av, 800, c24(av->bot.accent));
+        start_orbit(av, 800, av->bot.accent);
         start_breath(av, 900);
+        start_morph(av, 3000);
         break;
     case AVATAR_ANIM_SPEAKING:
-        lv_obj_remove_flag(av->mouth, LV_OBJ_FLAG_HIDDEN);
+        av->mouth_on = true;
         lv_timer_resume(av->level_timer);
+        start_morph(av, 5000);
         break;
-    case AVATAR_ANIM_ERROR:
-        start_shake(av);
+    case AVATAR_ANIM_ERROR: {
+        av->error_tint = true;
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, av->root);
+        lv_anim_set_exec_cb(&a, shake_exec);
+        lv_anim_set_values(&a, -12, 12);
+        lv_anim_set_duration(&a, 70);
+        lv_anim_set_reverse_duration(&a, 70);
+        lv_anim_set_repeat_count(&a, 4);
+        lv_anim_start(&a);
         break;
+    }
     case AVATAR_ANIM_STATIC:
     default:
         break;
     }
+    redraw(av);
 }
 
-static void proc_set_level(ui_avatar_t *av, uint8_t level)
-{
-    av->level_target = level;
-}
+static void proc_set_level(ui_avatar_t *av, uint8_t level) { av->level_target = level; }
 
 static void proc_set_base_scale(ui_avatar_t *av, int32_t scale_256)
 {
     if (scale_256 == av->base_scale) return;
     av->base_scale = scale_256;
-    apply_scale(av);
+    redraw(av);
+}
+
+static void proc_set_glow(ui_avatar_t *av, bool on)
+{
+    if (on == av->glow) return;
+    av->glow = on;
+    lv_anim_delete(av, glow_exec);
+    if (on) run(av, glow_exec, 0, 1000, 1800, 1800, 0, 0, lv_anim_path_ease_in_out);
+    redraw(av);
 }
 
 const ui_avatar_renderer_t ui_avatar_renderer_procedural = {
@@ -476,6 +491,7 @@ const ui_avatar_renderer_t ui_avatar_renderer_procedural = {
     .set_anim = proc_set_anim,
     .set_level = proc_set_level,
     .set_base_scale = proc_set_base_scale,
+    .set_glow = proc_set_glow,
 };
 
 /* ------------------------------------------------------------------ public */
@@ -487,7 +503,11 @@ ui_avatar_t *ui_avatar_create(lv_obj_t *parent, const ui_avatar_renderer_t *rend
     av->r = renderer ? renderer : &ui_avatar_renderer_procedural;
     av->base_scale = 256;
     av->anim = AVATAR_ANIM_STATIC;
-    av->root = plain(parent);
+    av->bot.scale_pct = 86;
+    av->bot.wobble = 50;
+    av->root = lv_obj_create(parent);
+    lv_obj_remove_style_all(av->root);
+    lv_obj_remove_flag(av->root, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     av->r->build(av);
     return av;
 }
@@ -497,6 +517,10 @@ void ui_avatar_set_bot(ui_avatar_t *av, const bot_info_t *bot) { av->r->set_bot(
 void ui_avatar_set_anim(ui_avatar_t *av, avatar_anim_t anim) { av->r->set_anim(av, anim); }
 void ui_avatar_set_level(ui_avatar_t *av, uint8_t level) { av->r->set_level(av, level); }
 void ui_avatar_set_base_scale(ui_avatar_t *av, int32_t s) { av->r->set_base_scale(av, s); }
+void ui_avatar_set_glow(ui_avatar_t *av, bool on)
+{
+    if (av->r->set_glow) av->r->set_glow(av, on);
+}
 
 avatar_anim_t ui_avatar_anim_for_status(muse_status_t s)
 {
