@@ -62,9 +62,10 @@ extern "C" {
 #define MUSE_SD_D0              GPIO_NUM_3
 #define MUSE_SD_D3_CS           GPIO_NUM_41   /* wired; unused in 1-bit SDMMC */
 
-/* ---- Buttons ---- */
-#define MUSE_BOOT_BUTTON        GPIO_NUM_0    /* active low while pressed; PTT for v1 */
-/* PWR is not a free GPIO: conditioned SYS_OUT on TCA9554 EXIO4 (high=pressed) */
+/* ---- Buttons (confirmed) ---- */
+#define MUSE_BOOT_BUTTON        GPIO_NUM_0    /* active low; press-and-hold PTT */
+/* PWR = power on/off only (AXP2101). SYS_OUT on TCA9554 EXIO4 (high=pressed).
+ * Not used for PTT — leave power management to the board/PMIC. */
 
 /* ---- Expansion header H2 (2.54 mm 8-pin) ---- */
 /* 1=VBUS 2=GND 3=3V3 4=GPIO44/U0RXD 5=GPIO43/U0TXD 6=GPIO17 7=GPIO18 8=GPIO16 */

@@ -13,10 +13,12 @@ Repo: https://github.com/roguespark-04/grokbot-companion
 | Board hardware | **Not arrived** — no on-device bring-up yet |
 | Meridian wake contract | **Locked** — see [WEBHOOK_CONTRACT.md](WEBHOOK_CONTRACT.md) |
 | Audio relay | **v1 ready** in [relay/](relay/) — Flask + persistent jobs; needs Meridian webhook URL |
+| Button mapping | **Confirmed** — BOOT = PTT; PWR = power (PMIC) |
 | Vertical slice | PTT → capture → upload → poll reply → play → status face (**stubs**) |
 
 ## Hardware
 
+- [Amazon product (ASIN B0F7XTJ7JW)](https://www.amazon.com/Waveshare-ESP32-S3-Development-Dual-core-Microphones/dp/B0F7XTJ7JW)
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm)
 - [Wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75)
 - [Official GitHub + HARDWARE_REFERENCE](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75)
@@ -26,8 +28,9 @@ Repo: https://github.com/roguespark-04/grokbot-companion
 | MCU | ESP32-S3R8, 8 MB PSRAM, 16 MB Flash |
 | Display | 1.75″ AMOLED 466×466, CO5300 (QSPI), touch CST9217 (I2C) |
 | Audio | ES7210 dual-mic + AEC; ES8311 I2S playback; 8 Ω 2 W speaker |
-| Power | AXP2101; RTC PCF85063; IMU QMI8658; IO expander TCA9554 |
-| PTT v1 | **BOOT** (GPIO0) or **PWR** (TCA9554 EXIO4) |
+| Power | AXP2101 PMIC; RTC PCF85063; IMU QMI8658; IO expander TCA9554 |
+| **BOOT (GPIO0)** | **Press-and-hold PTT** (confirmed): hold = capture audio; release = stop capture and start upload→relay flow |
+| **PWR** | **Power on/off only** (board AXP2101 / custom PWR behavior). Leave power management to the board/PMIC — firmware does not use PWR for PTT. |
 | Camera | **Not in v1** |
 
 Full GPIO map: [PINOUT.md](PINOUT.md).
@@ -36,8 +39,8 @@ Full GPIO map: [PINOUT.md](PINOUT.md).
 
 Device does **not** run Grok Bot. Device talks **only** to an audio relay (Tailscale):
 
-1. Press-to-talk → capture WAV (16 kHz mono PCM)
-2. `POST /upload` to relay → `{ job_id, audio_url, result_url }`
+1. Press-and-hold BOOT (PTT) → capture WAV (16 kHz mono PCM) while held
+2. Release PTT → stop capture; `POST /upload` to relay → `{ job_id, audio_url, result_url }`
 3. Relay POSTs JSON-only wake to Meridian (“Muse Charm wake”); **sender key stays on relay**
 4. Device polls `GET /result/:job_id` → play reply WAV
 5. Status face: idle / listening / thinking / speaking / error
@@ -51,7 +54,8 @@ When the board arrives, wire Waveshare demos into the stubs:
 1. Display face from `05_LVGL_WITH_RAM` (CO5300)
 2. Capture/playback from `06_I2SCodec` / BSP (ES7210 + ES8311)
 3. Wi-Fi + relay upload/poll against Spark’s Tailscale relay
-4. BOOT as PTT; face tracks state machine in `main/main.c`
+4. BOOT (GPIO0) as press-and-hold PTT; face tracks state machine in `main/main.c`
+5. Leave PWR / AXP2101 power behavior to the board — document only; no firmware PTT on PWR
 
 ## Build / flash (ESP-IDF)
 
@@ -85,7 +89,7 @@ grokbot-companion/
   main/
     CMakeLists.txt
     Kconfig.projbuild
-    main.c                  # state machine
+    main.c                  # state machine (BOOT PTT hold/release)
     *_stub modules...
     include/
   relay/                    # Audio relay v1 (shared box; not on-device)
@@ -98,6 +102,7 @@ Primary tree is ESP-IDF. Thin notes: [ARDUINO_NOTES.md](ARDUINO_NOTES.md).
 ## Open questions (Frank / Meridian / Spark)
 
 - ~~Final product & repo name~~ → **Grok Bot Companion** / `grokbot-companion`
+- ~~Button mapping~~ → **BOOT (GPIO0) = PTT**; **PWR = power on/off** (AXP2101; document only)
 - Spark relay host (Tailscale hostname) and device auth scheme (HMAC vs bearer)
 - Meridian → relay reply write mechanism (callback vs other)
 - Max PTT utterance length / upload size

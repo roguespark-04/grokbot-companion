@@ -65,9 +65,11 @@ menu "Pocket Companion Configuration"
         range 0 500
 
     config MUSE_PTT_USE_BOOT_BUTTON
-        bool "Use BOOT button (GPIO0) as press-to-talk"
+        bool "Use BOOT button (GPIO0) as press-and-hold PTT"
         default y
         help
-            BOOT is GPIO0 (active low). PWR via TCA9554 EXIO4 later. Touch PTT later.
+            Confirmed: BOOT GPIO0 (active low) is press-and-hold PTT
+            (hold=capture, release=upload→relay). PWR is power on/off only
+            (AXP2101 / board PMIC) — not used for PTT. Touch PTT deferred.
 
 endmenu

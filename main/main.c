@@ -1,6 +1,12 @@
 /**
- * Pocket companion (product name TBD) — ESP-IDF thin client
+ * Grok Bot Companion — ESP-IDF thin client
  * Board: Waveshare ESP32-S3-Touch-AMOLED-1.75
+ *
+ * Button mapping (confirmed):
+ *   BOOT (GPIO0) = press-and-hold PTT
+ *     hold    → LISTENING (capture audio)
+ *     release → stop capture → UPLOADING → THINKING → SPEAKING → IDLE
+ *   PWR = power on/off only (AXP2101 / board PMIC) — document only; not wired as PTT
  *
  * Vertical slice state machine:
  *   IDLE → LISTENING → UPLOADING → THINKING → SPEAKING → IDLE
@@ -54,7 +60,7 @@ static void run_turn(void)
     set_state(ST_LISTENING, MUSE_STATUS_LISTENING);
     audio_capture_start();
 
-    /* Hold PTT: accumulate PCM until release (stub polls button) */
+    /* BOOT PTT held: accumulate PCM until release → then upload→relay */
     while (ptt_button_is_pressed()) {
         int16_t scratch[256];
         (void)audio_capture_read(scratch, 256);
@@ -120,6 +126,7 @@ void app_main(void)
     (void)wifi_net_connect();
 
     while (1) {
+        /* IDLE: BOOT just pressed → after min hold, enter listen until release */
         if (s_state == ST_IDLE && ptt_button_was_just_pressed()) {
             vTaskDelay(pdMS_TO_TICKS(CONFIG_MUSE_PTT_HOLD_MS));
             if (ptt_button_is_pressed()) {

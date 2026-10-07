@@ -5,6 +5,7 @@ Authoritative source (fetched 2026-10-06):
 - [HARDWARE_REFERENCE.md](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75/blob/main/HARDWARE_REFERENCE.md)
 - BSP header: `firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/include/bsp/esp32_s3_touch_amoled_1_75.h`
 - Wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75
+- Amazon: https://www.amazon.com/Waveshare-ESP32-S3-Development-Dual-core-Microphones/dp/B0F7XTJ7JW
 
 Firmware macros: `main/include/board_pins.h`.
 
@@ -73,12 +74,14 @@ Waveshare BSP uses **1-bit SDMMC** (not wiki’s older SPI wording):
 | D0 | 3 |
 | D3/CS | 41 (wired; unused in 1-bit mount) |
 
-## Buttons / PTT
+## Buttons (confirmed mapping)
 
-| Control | Connection | PTT notes |
+| Control | Connection | Role |
 | --- | --- | --- |
-| **BOOT** | GPIO0, active low | **v1 PTT** |
-| **PWR** | AXP2101 path; `SYS_OUT` on TCA9554 **EXIO4** (high=pressed) | Alternate PTT |
+| **BOOT** | GPIO0, active low | **Press-and-hold PTT** (confirmed by Frank). Hold = capture audio; release = stop capture and start upload→relay flow. Wired in `ptt_button.c` via `MUSE_BOOT_BUTTON`. |
+| **PWR** | AXP2101 path; `SYS_OUT` on TCA9554 **EXIO4** (high=pressed) | **Power on/off only.** Board/PMIC (AXP2101) custom PWR behavior — leave power management to the board. Firmware does **not** use PWR for PTT. Document only; no firmware PTT wiring. |
+
+Touch-screen PTT (CST9217) is deferred; not part of v1 button mapping.
 
 ## Expansion header (2.54 mm 8-pin)
 
